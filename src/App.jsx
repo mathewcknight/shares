@@ -629,6 +629,91 @@ function CapitalDeployedChart({ transactions }) {
 }
 
 // ---------------------------------------------------------------------------
+// Yahoo Finance historical price fetching
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert a nabtrade instrument code to a Yahoo Finance ticker.
+ * e.g. "BHP" → "BHP.AX", "WBC.ASX" → "WBC.AX", "NAB.AXW" → "NAB.AX"
+ */
+function nabtradeTicker(code) {
+  if (!code) return null
+  const base = String(code)
+    .replace(/\.(ASX|AXW|AX)$/i, '')
+    .trim()
+    .toUpperCase()
+  return base ? `${base}.AX` : null
+}
+
+/**
+ * Fetch monthly closing prices for every unique ticker in `transactions`.
+ * Returns { [yahooTicker]: { [date_ms]: closePrice } }
+ * CORS failures are caught and warned per ticker; the rest still resolve.
+ */
+async function fetchHistoricalPrices(transactions) {
+  const tickers = [...new Set(
+    transactions.map(t => nabtradeTicker(t.code)).filter(Boolean),
+  )]
+
+  if (!tickers.length) {
+    console.log('[prices] No tickers found.')
+    return {}
+  }
+
+  console.log(`[prices] Fetching ${tickers.length} tickers:`, tickers)
+
+  const settled = await Promise.allSettled(
+    tickers.map(async (ticker) => {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1mo&range=20y`
+
+      let res
+      try {
+        res = await fetch(url)
+      } catch (err) {
+        console.warn(`[prices] CORS/network error – ${ticker}:`, err.message)
+        return [ticker, null]
+      }
+
+      if (!res.ok) {
+        console.warn(`[prices] HTTP ${res.status} – ${ticker}`)
+        return [ticker, null]
+      }
+
+      const json   = await res.json()
+      const result = json?.chart?.result?.[0]
+      if (!result) {
+        console.warn(`[prices] Empty response – ${ticker}`)
+        return [ticker, null]
+      }
+
+      const timestamps = result.timestamp ?? []
+      const closes     = result.indicators?.quote?.[0]?.close ?? []
+
+      const priceMap = {}
+      for (let i = 0; i < timestamps.length; i++) {
+        if (closes[i] != null) priceMap[timestamps[i] * 1000] = closes[i]
+      }
+
+      return [ticker, priceMap]
+    }),
+  )
+
+  const priceData = {}
+  for (const r of settled) {
+    if (r.status !== 'fulfilled' || !r.value?.[1]) continue
+    const [ticker, priceMap] = r.value
+    priceData[ticker] = priceMap
+    const ms   = Object.keys(priceMap).map(Number)
+    const from = new Date(Math.min(...ms)).toLocaleDateString('en-AU')
+    const to   = new Date(Math.max(...ms)).toLocaleDateString('en-AU')
+    console.log(`[prices] ${ticker}: ${ms.length} months  ${from} → ${to}`)
+  }
+
+  console.log('[prices] Done. Loaded:', Object.keys(priceData).join(', ') || '(none)')
+  return priceData
+}
+
+// ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
 
@@ -650,6 +735,7 @@ export default function App() {
         const metrics = calculateMetrics(data)
         logMetrics(metrics)
         setParsed({ ...data, metrics })
+        fetchHistoricalPrices(data.transactions)  // fire-and-forget; results logged to console
       } catch (err) {
         console.error('Parse error:', err)
         setParseError(err.message)
