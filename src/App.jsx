@@ -344,6 +344,80 @@ function logMetrics(metrics) {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 5: formatting helpers + summary card components
+// ---------------------------------------------------------------------------
+
+function fmtAUD(value) {
+  if (value === null || value === undefined) return '—'
+  const n = Number(value)
+  if (!isFinite(n)) return '—'
+  const abs = Math.abs(n)
+  const str = abs.toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return (n < 0 ? '-$' : '$') + str
+}
+
+function fmtPct(value) {
+  if (value === null || value === undefined) return '—'
+  const n = Number(value)
+  if (!isFinite(n)) return '—'
+  return (n >= 0 ? '+' : '') + (n * 100).toFixed(2) + '%'
+}
+
+function pnlColor(value) {
+  const n = Number(value)
+  if (!isFinite(n)) return '#f3f4f6'
+  return n >= 0 ? '#4ade80' : '#f87171'
+}
+
+function SummaryCard({ label, value, valueColor, sub, subColor }) {
+  return (
+    <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5 flex-1 min-w-0">
+      <p className="text-xs font-medium uppercase tracking-widest text-gray-500 truncate">{label}</p>
+      <p className="mt-2 text-2xl font-bold truncate" style={{ color: valueColor || '#f3f4f6' }}>{value}</p>
+      {sub && (
+        <p className="mt-1 text-sm font-semibold" style={{ color: subColor || '#9ca3af' }}>{sub}</p>
+      )}
+    </div>
+  )
+}
+
+function SummaryCards({ summary, metrics }) {
+  const totalMarketValue =
+    (Number(summary?.domesticHoldingsValue) || 0) +
+    (Number(summary?.cashPosition)          || 0)
+
+  return (
+    <div className="flex gap-4">
+      <SummaryCard
+        label="Total Market Value"
+        value={fmtAUD(totalMarketValue)}
+      />
+      <SummaryCard
+        label="Capital Invested"
+        value={fmtAUD(metrics.capitalInvested)}
+      />
+      <SummaryCard
+        label="Unrealised P&L"
+        value={fmtAUD(metrics.unrealisedPnL)}
+        valueColor={pnlColor(metrics.unrealisedPnL)}
+      />
+      <SummaryCard
+        label="Realised P&L"
+        value={fmtAUD(metrics.realisedPnL)}
+        valueColor={pnlColor(metrics.realisedPnL)}
+      />
+      <SummaryCard
+        label="Total Return"
+        value={fmtAUD(metrics.totalReturnDollars)}
+        valueColor={pnlColor(metrics.totalReturnDollars)}
+        sub={fmtPct(metrics.totalReturnPct)}
+        subColor={pnlColor(metrics.totalReturnPct)}
+      />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
 
@@ -390,8 +464,6 @@ export default function App() {
 
   const handleFileInput = (e) => handleFile(e.target.files[0])
 
-  const parseSucceeded = parsed !== null
-
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100" style={{ backgroundColor: '#0a0a0f' }}>
       {/* Header */}
@@ -402,94 +474,74 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main content */}
-      <main className="flex min-h-[calc(100vh-57px)] items-center justify-center p-8">
-        <div className="w-full max-w-lg space-y-6 text-center">
-          <div>
-            <h2 className="text-3xl font-bold text-white">Upload Your Portfolio</h2>
-            <p className="mt-2 text-gray-400">Import your nabtrade Excel export to analyse your holdings</p>
-          </div>
-
-          {/* Drop zone */}
-          <div
-            onDrop={handleDrop}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            className="rounded-2xl border-2 border-dashed p-14 transition-all duration-200 cursor-default"
-            style={{
-              borderColor: isDragging ? '#3b82f6' : '#374151',
-              backgroundColor: isDragging ? 'rgba(59,130,246,0.08)' : '#111827',
-            }}
-          >
-            <div className="space-y-5">
-              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-gray-800 text-3xl">
-                📊
-              </div>
-              <div>
-                <p className="text-base text-gray-300 font-medium">Drag &amp; drop your .xlsx file here</p>
-                <p className="mt-1 text-sm text-gray-500">Supports nabtrade portfolio exports</p>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="flex-1 border-t border-gray-700" />
-                <span className="text-xs text-gray-500 uppercase tracking-widest">or</span>
-                <div className="flex-1 border-t border-gray-700" />
-              </div>
-              <label className="inline-block cursor-pointer rounded-lg bg-blue-600 px-8 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-500 active:bg-blue-700">
-                Browse File
-                <input
-                  type="file"
-                  accept=".xlsx"
-                  className="hidden"
-                  onChange={handleFileInput}
-                />
-              </label>
+      {parsed ? (
+        /* Dashboard — replaces upload zone once a file is loaded */
+        <main className="mx-auto max-w-7xl px-6 py-8 space-y-6">
+          <SummaryCards summary={parsed.summary} metrics={parsed.metrics} />
+        </main>
+      ) : (
+        /* Upload screen */
+        <main className="flex min-h-[calc(100vh-57px)] items-center justify-center p-8">
+          <div className="w-full max-w-lg space-y-6 text-center">
+            <div>
+              <h2 className="text-3xl font-bold text-white">Upload Your Portfolio</h2>
+              <p className="mt-2 text-gray-400">Import your nabtrade Excel export to analyse your holdings</p>
             </div>
-          </div>
 
-          {/* Status */}
-          {fileName && !parseError && (
+            {/* Drop zone */}
             <div
-              className="flex items-center gap-3 rounded-xl border px-4 py-3 text-left"
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              className="rounded-2xl border-2 border-dashed p-14 transition-all duration-200 cursor-default"
               style={{
-                backgroundColor: parseSucceeded ? 'rgba(5,46,22,0.4)' : 'rgba(23,37,84,0.4)',
-                borderColor:     parseSucceeded ? '#14532d'            : '#1e3a8a',
+                borderColor: isDragging ? '#3b82f6' : '#374151',
+                backgroundColor: isDragging ? 'rgba(59,130,246,0.08)' : '#111827',
               }}
             >
+              <div className="space-y-5">
+                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-gray-800 text-3xl">
+                  📊
+                </div>
+                <div>
+                  <p className="text-base text-gray-300 font-medium">Drag &amp; drop your .xlsx file here</p>
+                  <p className="mt-1 text-sm text-gray-500">Supports nabtrade portfolio exports</p>
+                </div>
+                <div className="flex items-center gap-4">
+                  <div className="flex-1 border-t border-gray-700" />
+                  <span className="text-xs text-gray-500 uppercase tracking-widest">or</span>
+                  <div className="flex-1 border-t border-gray-700" />
+                </div>
+                <label className="inline-block cursor-pointer rounded-lg bg-blue-600 px-8 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-500 active:bg-blue-700">
+                  Browse File
+                  <input
+                    type="file"
+                    accept=".xlsx"
+                    className="hidden"
+                    onChange={handleFileInput}
+                  />
+                </label>
+              </div>
+            </div>
+
+            {/* Parse error */}
+            {parseError && (
               <div
-                className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-xs text-white"
-                style={{ backgroundColor: parseSucceeded ? '#16a34a' : '#2563eb' }}
+                className="flex items-center gap-3 rounded-xl border px-4 py-3 text-left"
+                style={{ backgroundColor: 'rgba(69,10,10,0.4)', borderColor: '#7f1d1d' }}
               >
-                {parseSucceeded ? '✓' : '…'}
+                <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-red-600 text-xs text-white">!</div>
+                <div>
+                  <p className="text-sm font-medium text-red-300">Parse failed</p>
+                  <p className="text-xs text-gray-500">{parseError}</p>
+                </div>
               </div>
-              <div>
-                <p className="text-sm font-medium" style={{ color: parseSucceeded ? '#86efac' : '#93c5fd' }}>
-                  {fileName}
-                </p>
-                <p className="text-xs text-gray-500">
-                  {parseSucceeded
-                    ? `${parsed.holdings.length} holdings · ${parsed.transactions.length} transactions · ${parsed.dividends.length} dividends · check console`
-                    : 'Parsing…'}
-                </p>
-              </div>
-            </div>
-          )}
+            )}
 
-          {parseError && (
-            <div
-              className="flex items-center gap-3 rounded-xl border px-4 py-3 text-left"
-              style={{ backgroundColor: 'rgba(69,10,10,0.4)', borderColor: '#7f1d1d' }}
-            >
-              <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-red-600 text-xs text-white">!</div>
-              <div>
-                <p className="text-sm font-medium text-red-300">Parse failed</p>
-                <p className="text-xs text-gray-500">{parseError}</p>
-              </div>
-            </div>
-          )}
-
-          <p className="text-xs text-gray-600">All processing happens locally in your browser. No data is uploaded.</p>
-        </div>
-      </main>
+            <p className="text-xs text-gray-600">All processing happens locally in your browser. No data is uploaded.</p>
+          </div>
+        </main>
+      )}
     </div>
   )
 }
