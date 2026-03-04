@@ -1130,7 +1130,7 @@ function buildPortfolioValueSeries(transactions, priceData) {
     let vgsUnits = 0
     let bTxIdx = 0
     const buyTx = [...transactions]
-      .filter(t => isBuyType(t.movementType))
+      .filter(t => isChartBuyOnly(t.movementType))  // BUY only — excludes DRP and SELL
       .sort((a, b) => toSortableDate(a.date) - toSortableDate(b.date))
 
     // ── DEBUG: log VGS price range to detect near-zero prices ──────────────
@@ -1146,7 +1146,7 @@ function buildPortfolioValueSeries(transactions, priceData) {
 
     // ── DEBUG: per-BUY transaction log ─────────────────────────────────────
     console.group('[Benchmark DEBUG] BUY transactions → hypothetical VGS units')
-    console.log('Note: SELLs are NOT currently reducing VGS units (pure buy-and-hold benchmark)')
+    console.log('Only BUY transactions counted (DRP and SELL excluded). Units never reduced.')
     let runningUnits = 0
     for (const t of buyTx) {
       const settlement = Math.abs(Number(t.settlementAmount) || 0)
