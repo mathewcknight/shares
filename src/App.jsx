@@ -60,26 +60,133 @@ function parseDomesticHoldingsSheet(sheet) {
   return rows
 }
 
+// Returns true if any string cell value in a row (across given col range)
+// contains a stop sentinel for the Transactions sheet.
+function rowHasTransactionSentinel(sheet, rowIndex, colCount) {
+  const XLSX = window.XLSX
+  for (let c = 0; c < colCount; c++) {
+    const addr = XLSX.utils.encode_cell({ r: rowIndex, c })
+    const cell = sheet[addr]
+    if (!cell || typeof cell.v !== 'string') continue
+    if (cell.v.includes('Important Information')) return true
+    if (cell.v.startsWith('(1)')) return true
+  }
+  return false
+}
+
+function parseTransactionsSheet(sheet) {
+  // Headers row 2 (index 1), data from row 3 (index 2)
+  // Columns (0-based):
+  //   0: Account,  1: Description,      2: Code,             3: Date,
+  //   4: Movement Type,                 5: Confirmation Number,
+  //   6: Exchange Currency,             7: Quantity,
+  //   8: Transaction Price,             9: Value,
+  //  10: Brokerage, 11: Other Fees,    12: Average Price,
+  //  13: Multiplier,                   14: Settlement Amount (AUD)
+  const rows = []
+  let rowIndex = 2
+
+  while (true) {
+    const code = getCellValue(sheet, rowIndex, 2)
+
+    // Stop if Code is null/empty
+    if (code === null || code === undefined || code === '') break
+
+    // Stop if any cell in the row contains a sentinel string
+    if (rowHasTransactionSentinel(sheet, rowIndex, 15)) break
+
+    rows.push({
+      account:            getCellValue(sheet, rowIndex, 0),
+      description:        getCellValue(sheet, rowIndex, 1),
+      code,
+      date:               getCellValue(sheet, rowIndex, 3),
+      movementType:       getCellValue(sheet, rowIndex, 4),
+      confirmationNumber: getCellValue(sheet, rowIndex, 5),
+      exchangeCurrency:   getCellValue(sheet, rowIndex, 6),
+      quantity:           getCellValue(sheet, rowIndex, 7),
+      transactionPrice:   getCellValue(sheet, rowIndex, 8),
+      value:              getCellValue(sheet, rowIndex, 9),
+      brokerage:          getCellValue(sheet, rowIndex, 10),
+      otherFees:          getCellValue(sheet, rowIndex, 11),
+      averagePrice:       getCellValue(sheet, rowIndex, 12),
+      multiplier:         getCellValue(sheet, rowIndex, 13),
+      settlementAmount:   getCellValue(sheet, rowIndex, 14),
+    })
+
+    rowIndex++
+  }
+
+  return rows
+}
+
+function parseDividendsOrInterestSheet(sheet) {
+  // Headers row 2 (index 1), data from row 3 (index 2)
+  // Columns (0-based): 0: Account, 1: Date, 2: Description, 3: Value
+  // Stop at any row whose Description contains "Important Information"
+  const rows = []
+  let rowIndex = 2
+
+  while (true) {
+    const description = getCellValue(sheet, rowIndex, 2)
+    const account     = getCellValue(sheet, rowIndex, 0)
+
+    // Stop if both account and description are empty (blank row)
+    if ((account === null || account === '') &&
+        (description === null || description === '')) break
+
+    // Stop at Important Information sentinel
+    if (typeof description === 'string' && description.includes('Important Information')) break
+    if (typeof account === 'string' && account.includes('Important Information')) break
+
+    rows.push({
+      account,
+      date:        getCellValue(sheet, rowIndex, 1),
+      description,
+      value:       getCellValue(sheet, rowIndex, 3),
+    })
+
+    rowIndex++
+  }
+
+  return rows
+}
+
 function parseWorkbook(arrayBuffer) {
   const XLSX = window.XLSX
   const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true })
 
-  const summarySheet  = workbook.Sheets['Summary']
-  const holdingsSheet = workbook.Sheets['Domestic Holdings']
+  const sheetNames = workbook.SheetNames
+  const summarySheet      = workbook.Sheets['Summary']
+  const holdingsSheet     = workbook.Sheets['Domestic Holdings']
+  const transactionsSheet = workbook.Sheets['Domestic Portfolio Transactions']
+  const dividendsSheet    = workbook.Sheets['Domestic Dividends']
+  const interestSheet     = workbook.Sheets['Interest']
 
-  if (!summarySheet)  console.warn('Sheet "Summary" not found. Available:', workbook.SheetNames)
-  if (!holdingsSheet) console.warn('Sheet "Domestic Holdings" not found. Available:', workbook.SheetNames)
+  if (!summarySheet)      console.warn('Sheet "Summary" not found. Available:', sheetNames)
+  if (!holdingsSheet)     console.warn('Sheet "Domestic Holdings" not found. Available:', sheetNames)
+  if (!transactionsSheet) console.warn('Sheet "Domestic Portfolio Transactions" not found. Available:', sheetNames)
+  if (!dividendsSheet)    console.warn('Sheet "Domestic Dividends" not found. Available:', sheetNames)
+  if (!interestSheet)     console.warn('Sheet "Interest" not found. Available:', sheetNames)
 
-  const summary  = summarySheet  ? parseSummarySheet(summarySheet)           : null
-  const holdings = holdingsSheet ? parseDomesticHoldingsSheet(holdingsSheet) : []
+  const summary      = summarySheet      ? parseSummarySheet(summarySheet)                 : null
+  const holdings     = holdingsSheet     ? parseDomesticHoldingsSheet(holdingsSheet)       : []
+  const transactions = transactionsSheet ? parseTransactionsSheet(transactionsSheet)       : []
+  const dividends    = dividendsSheet    ? parseDividendsOrInterestSheet(dividendsSheet)   : []
+  const interest     = interestSheet     ? parseDividendsOrInterestSheet(interestSheet)    : []
 
-  console.group('=== Stage 2 Parse Results ===')
+  console.group('=== Stage 3 Parse Results ===')
   console.log('Summary:', summary)
   console.log('Holdings row count:', holdings.length)
   console.log('Holdings sample (first 3):', holdings.slice(0, 3))
+  console.log('Transactions row count:', transactions.length)
+  console.log('Transactions sample (first 3):', transactions.slice(0, 3))
+  console.log('Dividends row count:', dividends.length)
+  console.log('Dividends sample (first 3):', dividends.slice(0, 3))
+  console.log('Interest row count:', interest.length)
+  console.log('Interest sample (first 3):', interest.slice(0, 3))
   console.groupEnd()
 
-  return { summary, holdings }
+  return { summary, holdings, transactions, dividends, interest }
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +311,7 @@ export default function App() {
                 </p>
                 <p className="text-xs text-gray-500">
                   {parseSucceeded
-                    ? `Parsed — ${parsed.holdings.length} holdings · check console for details`
+                    ? `${parsed.holdings.length} holdings · ${parsed.transactions.length} transactions · ${parsed.dividends.length} dividends · check console`
                     : 'Parsing…'}
                 </p>
               </div>
