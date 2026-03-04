@@ -277,7 +277,8 @@ function calculateMetrics({ holdings, transactions, dividends }) {
   //   qty            -= sellQty
   //   totalCost       = avgCost * remainingQty   ← avg cost unchanged
   // ------------------------------------------------------------------
-  const costBasisByTicker = {}
+  const costBasisByTicker  = {}
+  const realisedByTicker   = {} // { [code]: { pnl, totalInvested } }
   let realisedPnL = 0
 
   for (const t of sorted) {
@@ -286,16 +287,21 @@ function calculateMetrics({ holdings, transactions, dividends }) {
     const settlement = Math.abs(Number(t.settlementAmount) || 0)
 
     if (!costBasisByTicker[code]) costBasisByTicker[code] = { qty: 0, totalCost: 0 }
+    if (!realisedByTicker[code])  realisedByTicker[code]  = { pnl: 0, totalInvested: 0 }
     const pos = costBasisByTicker[code]
+    const rec = realisedByTicker[code]
 
     if (isBuyType(t.movementType)) {
-      pos.qty       += tradeQty
-      pos.totalCost += settlement
+      pos.qty            += tradeQty
+      pos.totalCost      += settlement
+      rec.totalInvested  += settlement
 
     } else if (isSellType(t.movementType)) {
       if (pos.qty > 0) {
         const avgCost      = pos.totalCost / pos.qty
-        realisedPnL       += settlement - avgCost * tradeQty
+        const tradePnL     = settlement - avgCost * tradeQty
+        realisedPnL       += tradePnL
+        rec.pnl            += tradePnL
         const remainingQty = Math.max(0, pos.qty - tradeQty)
         pos.qty            = remainingQty
         pos.totalCost      = avgCost * remainingQty
@@ -329,6 +335,7 @@ function calculateMetrics({ holdings, transactions, dividends }) {
     totalReturnDollars,
     totalReturnPct,
     costBasisByTicker,
+    realisedByTicker,
   }
 }
 
@@ -422,7 +429,144 @@ function SummaryCards({ summary, metrics }) {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 6: Cumulative Capital Deployed chart
+// Stage 6: Position tables (Closed & Open)
+// ---------------------------------------------------------------------------
+
+function SortToggle({ value, onChange }) {
+  return (
+    <div className="flex gap-1">
+      {['$', '%'].map(v => (
+        <button
+          key={v}
+          onClick={() => onChange(v)}
+          className="px-2.5 py-0.5 rounded text-xs font-semibold transition-colors"
+          style={{
+            background: value === v ? '#3b82f6' : '#1f2937',
+            color:      value === v ? '#fff'    : '#6b7280',
+          }}
+        >
+          {v}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function rowBg(pnl) {
+  const n = Number(pnl)
+  if (!isFinite(n) || n === 0) return 'transparent'
+  return n > 0 ? 'rgba(74,222,128,0.07)' : 'rgba(248,113,113,0.07)'
+}
+
+function ClosedPositionsTable({ metrics }) {
+  const [sortBy, setSortBy] = React.useState('$')
+
+  const { costBasisByTicker, realisedByTicker } = metrics
+
+  // Closed = qty rounds to zero after all transactions
+  const rows = Object.entries(realisedByTicker)
+    .filter(([code]) => (costBasisByTicker[code]?.qty ?? 0) < 0.001)
+    .map(([code, { pnl, totalInvested }]) => ({
+      code,
+      pnl,
+      pct: totalInvested > 0 ? pnl / totalInvested : null,
+    }))
+    .sort((a, b) => sortBy === '$'
+      ? b.pnl - a.pnl
+      : (b.pct ?? -Infinity) - (a.pct ?? -Infinity))
+
+  return (
+    <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5 flex flex-col gap-3 min-w-0">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold uppercase tracking-widest text-gray-400">Closed Positions</h3>
+        <SortToggle value={sortBy} onChange={setSortBy} />
+      </div>
+      {rows.length === 0 ? (
+        <p className="text-xs text-gray-600 italic">No closed positions found.</p>
+      ) : (
+        <div className="overflow-y-auto" style={{ maxHeight: 380 }}>
+          <table className="w-full text-sm border-collapse">
+            <thead>
+              <tr className="text-xs uppercase tracking-wider text-gray-500">
+                <th className="text-left py-1.5 pr-4 font-medium">Code</th>
+                <th className="text-right py-1.5 pr-4 font-medium">Realised P&amp;L $</th>
+                <th className="text-right py-1.5 font-medium">Realised P&amp;L %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.code} style={{ backgroundColor: rowBg(r.pnl) }}>
+                  <td className="py-1.5 pr-4 font-mono font-semibold text-gray-200">{r.code}</td>
+                  <td className="py-1.5 pr-4 text-right tabular-nums" style={{ color: r.pnl >= 0 ? '#4ade80' : '#f87171' }}>
+                    {fmtAUD(r.pnl)}
+                  </td>
+                  <td className="py-1.5 text-right tabular-nums" style={{ color: r.pnl >= 0 ? '#4ade80' : '#f87171' }}>
+                    {fmtPct(r.pct)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function OpenPositionsTable({ holdings }) {
+  const [sortBy, setSortBy] = React.useState('$')
+
+  const rows = [...holdings]
+    .filter(h => h.code && h.gainLoss != null)
+    .map(h => ({
+      code: h.code,
+      pnl:  Number(h.gainLoss)    || 0,
+      pct:  h.gainLossPct != null ? Number(h.gainLossPct) : null,
+    }))
+    .sort((a, b) => sortBy === '$'
+      ? b.pnl - a.pnl
+      : (b.pct ?? -Infinity) - (a.pct ?? -Infinity))
+
+  return (
+    <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5 flex flex-col gap-3 min-w-0">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold uppercase tracking-widest text-gray-400">Open Positions</h3>
+        <SortToggle value={sortBy} onChange={setSortBy} />
+      </div>
+      {rows.length === 0 ? (
+        <p className="text-xs text-gray-600 italic">No open positions found.</p>
+      ) : (
+        <div className="overflow-y-auto" style={{ maxHeight: 380 }}>
+          <table className="w-full text-sm border-collapse">
+            <thead>
+              <tr className="text-xs uppercase tracking-wider text-gray-500">
+                <th className="text-left py-1.5 pr-4 font-medium">Code</th>
+                <th className="text-right py-1.5 pr-4 font-medium">Unrealised P&amp;L $</th>
+                <th className="text-right py-1.5 font-medium">Unrealised P&amp;L %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.code} style={{ backgroundColor: rowBg(r.pnl) }}>
+                  <td className="py-1.5 pr-4 font-mono font-semibold text-gray-200">{r.code}</td>
+                  <td className="py-1.5 pr-4 text-right tabular-nums" style={{ color: r.pnl >= 0 ? '#4ade80' : '#f87171' }}>
+                    {fmtAUD(r.pnl)}
+                  </td>
+                  <td className="py-1.5 text-right tabular-nums" style={{ color: r.pnl >= 0 ? '#4ade80' : '#f87171' }}>
+                    {fmtPct(r.pct)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Stage 7: Cumulative Capital Deployed chart
 // ---------------------------------------------------------------------------
 
 function fmtDate(value) {
@@ -1015,6 +1159,10 @@ export default function App() {
         /* Dashboard — replaces upload zone once a file is loaded */
         <main className="mx-auto max-w-7xl px-6 py-8 space-y-6">
           <SummaryCards summary={parsed.summary} metrics={parsed.metrics} />
+          <div className="grid grid-cols-2 gap-6">
+            <ClosedPositionsTable metrics={parsed.metrics} />
+            <OpenPositionsTable   holdings={parsed.holdings} />
+          </div>
           <CapitalDeployedChart transactions={parsed.transactions} />
           <PortfolioValueChart
             transactions={parsed.transactions}
