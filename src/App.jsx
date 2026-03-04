@@ -588,6 +588,7 @@ function CapitalDeployedChart({ transactions }) {
             tickCount={8}
           />
           <YAxis
+            domain={[0, 'auto']}
             tickFormatter={yTickFmt}
             tick={{ fill: '#6b7280', fontSize: 11 }}
             axisLine={{ stroke: '#374151' }}
@@ -688,9 +689,12 @@ function buildPortfolioValueSeries(transactions, priceData) {
     rawLine.push({ x: ms, y: value })
   }
 
-  // Trim leading zeros (before portfolio had any value)
+  // Trim leading zeros (before first buy) and trailing zeros (after full exit)
   const firstNonZero = rawLine.findIndex(p => p.y > 0)
-  const lineData = firstNonZero >= 0 ? rawLine.slice(firstNonZero) : []
+  if (firstNonZero < 0) return empty
+  let lastNonZero = rawLine.length - 1
+  while (lastNonZero > firstNonZero && rawLine[lastNonZero].y === 0) lastNonZero--
+  const lineData = rawLine.slice(firstNonZero, lastNonZero + 1)
 
   if (!lineData.length) return empty
 
@@ -779,20 +783,9 @@ function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTic
       </h3>
 
       {failedTickers.length > 0 && (
-        <div
-          className="flex items-start gap-3 rounded-xl border px-4 py-3"
-          style={{ backgroundColor: 'rgba(69,40,10,0.4)', borderColor: '#92400e' }}
-        >
-          <div className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-amber-600 text-xs text-white mt-0.5">
-            !
-          </div>
-          <div>
-            <p className="text-sm font-medium text-amber-300">Price data unavailable for some tickers</p>
-            <p className="text-xs text-gray-400 mt-0.5">
-              Excluded from chart: <strong>{failedTickers.join(', ')}</strong>
-            </p>
-          </div>
-        </div>
+        <p className="text-xs italic text-gray-500">
+          No price data for {failedTickers.join(', ')} — excluded from chart.
+        </p>
       )}
 
       <ResponsiveContainer width="100%" height={420}>
