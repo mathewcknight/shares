@@ -288,7 +288,7 @@ function calculateMetrics({ holdings, transactions, dividends }) {
     const settlement = Math.abs(Number(t.settlementAmount) || 0)
 
     if (!costBasisByTicker[code]) costBasisByTicker[code] = { qty: 0, totalCost: 0 }
-    if (!realisedByTicker[code])  realisedByTicker[code]  = { pnl: 0, totalInvested: 0 }
+    if (!realisedByTicker[code])  realisedByTicker[code]  = { pnl: 0, totalInvested: 0, totalProceeds: 0 }
     const pos = costBasisByTicker[code]
     const rec = realisedByTicker[code]
 
@@ -303,6 +303,7 @@ function calculateMetrics({ holdings, transactions, dividends }) {
         const tradePnL     = settlement - avgCost * tradeQty
         realisedPnL       += tradePnL
         rec.pnl            += tradePnL
+        rec.totalProceeds  += settlement
         const remainingQty = Math.max(0, pos.qty - tradeQty)
         pos.qty            = remainingQty
         pos.totalCost      = avgCost * remainingQty
@@ -425,6 +426,114 @@ function SummaryCards({ summary, metrics }) {
         sub={fmtPct(metrics.totalReturnPct)}
         subColor={pnlColor(metrics.totalReturnPct)}
       />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Stage 10: Holdings Table
+// ---------------------------------------------------------------------------
+
+function HoldingsTable({ holdings, metrics, transactions }) {
+  const [sort, setSort] = React.useState({ col: 'returnPct', dir: 'desc' })
+
+  const { costBasisByTicker, realisedByTicker } = metrics
+
+  // description fallback: first transaction description per code
+  const txDescMap = {}
+  for (const t of transactions) {
+    if (!txDescMap[t.code] && t.description) txDescMap[t.code] = t.description
+  }
+
+  const holdingsMap = {}
+  for (const h of holdings) {
+    if (h.code) holdingsMap[h.code] = h
+  }
+
+  // Union all codes seen in either transactions or current holdings
+  const allCodes = new Set([
+    ...Object.keys(realisedByTicker),
+    ...Object.keys(holdingsMap),
+  ])
+
+  const rows = [...allCodes].map(code => {
+    const isOpen = (costBasisByTicker[code]?.qty ?? 0) > 0.001
+    const h = holdingsMap[code]
+    const r = realisedByTicker[code]
+
+    const rawDesc   = h?.description ?? txDescMap[code] ?? code
+    const description = String(rawDesc).split(/\s+/).slice(0, 4).join(' ')
+
+    const capitalInvested = r?.totalInvested ?? 0
+    const currentValue    = isOpen ? (Number(h?.marketValue) || 0) : (r?.totalProceeds ?? 0)
+    const pnl             = isOpen ? (Number(h?.gainLoss)    || 0) : (r?.pnl ?? 0)
+    const returnPct       = capitalInvested > 0 ? pnl / capitalInvested : null
+    const quantity        = isOpen ? (Number(h?.quantity)    || 0) : 0
+
+    return { code, description, status: isOpen ? 'Open' : 'Closed', capitalInvested, currentValue, pnl, returnPct, quantity }
+  })
+
+  const handleSort = col =>
+    setSort(s => ({ col, dir: s.col === col && s.dir === 'desc' ? 'asc' : 'desc' }))
+
+  const sorted = [...rows].sort((a, b) => {
+    const mul = sort.dir === 'desc' ? -1 : 1
+    const av  = a[sort.col] ?? (sort.dir === 'desc' ? -Infinity : Infinity)
+    const bv  = b[sort.col] ?? (sort.dir === 'desc' ? -Infinity : Infinity)
+    return typeof av === 'string' ? mul * av.localeCompare(bv) : mul * (av - bv)
+  })
+
+  const Th = ({ col, children, right }) => (
+    <th
+      onClick={() => handleSort(col)}
+      className={`py-2 pr-3 text-xs font-medium uppercase tracking-wider cursor-pointer select-none ${right ? 'text-right' : 'text-left'}`}
+      style={{ color: sort.col === col ? '#d1d5db' : '#6b7280' }}
+    >
+      {children}
+      <span style={{ marginLeft: 3, opacity: sort.col === col ? 1 : 0.3 }}>
+        {sort.col === col ? (sort.dir === 'desc' ? '↓' : '↑') : '↕'}
+      </span>
+    </th>
+  )
+
+  return (
+    <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5 flex flex-col gap-3">
+      <h3 className="text-sm font-semibold uppercase tracking-widest text-gray-400">All Holdings</h3>
+      <div className="overflow-y-auto" style={{ maxHeight: 480 }}>
+        <table className="w-full text-sm border-collapse">
+          <thead className="sticky top-0 bg-gray-900 z-10">
+            <tr>
+              <Th col="code">Code</Th>
+              <Th col="description">Description</Th>
+              <Th col="status">Status</Th>
+              <Th col="capitalInvested" right>Capital Invested</Th>
+              <Th col="currentValue"    right>Current Value</Th>
+              <Th col="pnl"             right>P&amp;L $</Th>
+              <Th col="returnPct"       right>Return %</Th>
+              <Th col="quantity"        right>Quantity</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map(r => (
+              <tr key={r.code} style={{ backgroundColor: rowBg(r.pnl) }}>
+                <td className="py-1.5 pr-3 font-mono font-semibold text-gray-200">{r.code}</td>
+                <td className="py-1.5 pr-3 text-gray-400" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.description}</td>
+                <td className="py-1.5 pr-3">
+                  <span className="text-xs px-1.5 py-0.5 rounded font-medium" style={{
+                    background: r.status === 'Open' ? 'rgba(59,130,246,0.15)' : 'rgba(75,85,99,0.3)',
+                    color:      r.status === 'Open' ? '#93c5fd' : '#9ca3af',
+                  }}>{r.status}</span>
+                </td>
+                <td className="py-1.5 pr-3 text-right tabular-nums text-gray-300">{fmtAUD(r.capitalInvested)}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums text-gray-300">{fmtAUD(r.currentValue)}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums" style={{ color: r.pnl >= 0 ? '#4ade80' : '#f87171' }}>{fmtAUD(r.pnl)}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums" style={{ color: (r.returnPct ?? 0) >= 0 ? '#4ade80' : '#f87171' }}>{fmtPct(r.returnPct)}</td>
+                <td className="py-1.5 text-right tabular-nums text-gray-300">{r.quantity > 0 ? r.quantity.toLocaleString('en-AU') : '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
@@ -1412,6 +1521,11 @@ export default function App() {
             <ClosedPositionsTable metrics={parsed.metrics} />
             <OpenPositionsTable   holdings={parsed.holdings} />
           </div>
+          <HoldingsTable
+            holdings={parsed.holdings}
+            metrics={parsed.metrics}
+            transactions={parsed.transactions}
+          />
           <CapitalDeployedChart transactions={parsed.transactions} />
           <PortfolioValueChart
             transactions={parsed.transactions}
