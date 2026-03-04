@@ -774,6 +774,127 @@ function CapitalDeployedChart({ transactions }) {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 8: Returns Breakdown series (data only)
+// ---------------------------------------------------------------------------
+
+/**
+ * buildReturnComponentSeries(transactions, dividends, priceData)
+ *
+ * At each month-end timestamp present in priceData returns:
+ *   x          – timestamp ms (for Recharts)
+ *   unrealised – Σ (qty × price − costBasis) for all held tickers with price data
+ *   realised   – cumulative realised P&L from all SELLs up to this date
+ *   dividends  – cumulative cash dividends (Domestic Dividends sheet) up to this date
+ *   drp        – cumulative DRP settlement amounts up to this date
+ *
+ * Uses the same running-pointer technique as buildPortfolioValueSeries.
+ * Trims leading all-zero rows. Logs first and last 3 rows to console.
+ */
+function buildReturnComponentSeries(transactions, dividends, priceData) {
+  if (!priceData || !Object.keys(priceData).length) return []
+
+  // ── 1. Union of all month timestamps ───────────────────────────────────────
+  const allMs = new Set()
+  for (const priceMap of Object.values(priceData)) {
+    for (const ms of Object.keys(priceMap)) allMs.add(Number(ms))
+  }
+  const sortedMonths = [...allMs].sort((a, b) => a - b)
+  if (!sortedMonths.length) return []
+
+  // ── 2. Sort inputs chronologically ─────────────────────────────────────────
+  const sortedTx = [...transactions].sort(
+    (a, b) => toSortableDate(a.date) - toSortableDate(b.date),
+  )
+  const sortedDiv = [...dividends].sort(
+    (a, b) => toSortableDate(a.date) - toSortableDate(b.date),
+  )
+
+  // ── 3. Walk months with running state ──────────────────────────────────────
+  const holdings   = {} // yahooTicker → { qty, totalCost }
+  let cumRealised  = 0
+  let cumDrp       = 0
+  let cumDividends = 0
+  let txIdx  = 0
+  let divIdx = 0
+  const result = []
+
+  for (const ms of sortedMonths) {
+    // Advance transaction pointer: apply all tx with date ≤ ms
+    while (txIdx < sortedTx.length) {
+      const t = sortedTx[txIdx]
+      if (toSortableDate(t.date) > ms) break
+
+      const ticker     = nabtradeTicker(t.code)
+      const tradeQty   = Math.abs(Number(t.quantity)         || 0)
+      const settlement = Math.abs(Number(t.settlementAmount) || 0)
+
+      if (ticker) {
+        if (!holdings[ticker]) holdings[ticker] = { qty: 0, totalCost: 0 }
+        const pos = holdings[ticker]
+
+        if (isChartBuyOnly(t.movementType)) {
+          pos.qty       += tradeQty
+          pos.totalCost += settlement
+
+        } else if (isChartDRP(t.movementType)) {
+          pos.qty       += tradeQty
+          pos.totalCost += settlement
+          cumDrp        += settlement
+
+        } else if (isChartSell(t.movementType)) {
+          if (pos.qty > 0) {
+            const avgCost      = pos.totalCost / pos.qty
+            cumRealised       += settlement - avgCost * tradeQty
+            const remainingQty = Math.max(0, pos.qty - tradeQty)
+            pos.qty            = remainingQty
+            pos.totalCost      = avgCost * remainingQty
+          }
+        }
+      }
+      txIdx++
+    }
+
+    // Advance dividend pointer: accumulate all dividends with date ≤ ms
+    while (divIdx < sortedDiv.length) {
+      const d = sortedDiv[divIdx]
+      if (toSortableDate(d.date) > ms) break
+      cumDividends += Number(d.value) || 0
+      divIdx++
+    }
+
+    // Unrealised: Σ (qty × price − costBasis) for tickers with price data
+    let unrealised = 0
+    for (const [ticker, { qty, totalCost }] of Object.entries(holdings)) {
+      if (qty <= 0) continue
+      const price = priceData[ticker]?.[ms]
+      if (price != null) unrealised += qty * price - totalCost
+    }
+
+    result.push({ x: ms, unrealised, realised: cumRealised, dividends: cumDividends, drp: cumDrp })
+  }
+
+  // Trim leading all-zero rows
+  const firstActive = result.findIndex(
+    r => r.unrealised !== 0 || r.realised !== 0 || r.dividends !== 0 || r.drp !== 0,
+  )
+  const trimmed = firstActive >= 0 ? result.slice(firstActive) : result
+
+  // Console diagnostics
+  const fmt = r => `  ${new Date(r.x).toLocaleDateString('en-AU')}` +
+    `  unreal=${r.unrealised.toFixed(0)}` +
+    `  real=${r.realised.toFixed(0)}` +
+    `  div=${r.dividends.toFixed(0)}` +
+    `  drp=${r.drp.toFixed(0)}`
+  console.group('[Stage 8] buildReturnComponentSeries')
+  console.log(`Total rows: ${trimmed.length}`)
+  trimmed.slice(0, 3).forEach(r => console.log('First:', fmt(r)))
+  trimmed.slice(-3).forEach(r => console.log('Last: ', fmt(r)))
+  console.groupEnd()
+
+  return trimmed
+}
+
+// ---------------------------------------------------------------------------
 // Stage 7: Portfolio Market Value chart
 // ---------------------------------------------------------------------------
 
@@ -1099,6 +1220,7 @@ export default function App() {
   const [pricesLoading, setPricesLoading] = useState(false)
   const [priceData, setPriceData]         = useState(null)
   const [failedTickers, setFailedTickers] = useState([])
+  const [returnSeries, setReturnSeries]   = useState([])
 
   const handleFile = (file) => {
     if (!file || !file.name.endsWith('.xlsx')) return
@@ -1106,6 +1228,7 @@ export default function App() {
     setParseError(null)
     setPriceData(null)
     setFailedTickers([])
+    setReturnSeries([])
 
     const reader = new FileReader()
     reader.onload = async (e) => {
@@ -1118,6 +1241,7 @@ export default function App() {
         const { prices, failed } = await fetchHistoricalPrices(data.transactions)
         setPriceData(prices)
         setFailedTickers(failed)
+        setReturnSeries(buildReturnComponentSeries(data.transactions, data.dividends, prices))
       } catch (err) {
         console.error('Parse error:', err)
         setParseError(err.message)
