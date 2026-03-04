@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react'
 import {
   ComposedChart, Line, Scatter, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, Legend,
+  Tooltip, ResponsiveContainer, Legend, Brush,
 } from 'recharts'
 
 // ---------------------------------------------------------------------------
@@ -438,18 +438,43 @@ function fmtDate(value) {
   return String(value)
 }
 
+// Fine-grained movement-type classifiers used only by the chart.
+// (isBuyType / isSellType in the summary section remain unchanged.)
+function isChartBuyOnly(mt) {
+  if (!mt) return false
+  const t = String(mt).toLowerCase()
+  return t.includes('buy') && !t.includes('drp') && !t.includes('reinvestment')
+}
+function isChartDRP(mt) {
+  if (!mt) return false
+  const t = String(mt).toLowerCase()
+  return t.includes('drp') || t.includes('dividend reinvestment')
+}
+function isChartCashDiv(mt) {
+  if (!mt) return false
+  const t = String(mt).toLowerCase()
+  return t.includes('dividend') && !t.includes('reinvestment') && !t.includes('drp')
+}
+function isChartSell(mt) {
+  if (!mt) return false
+  return String(mt).toLowerCase().includes('sell')
+}
+
 /**
- * Returns { lineData, buyPoints, sellPoints } for the chart.
- * lineData       – one entry per buy/sell transaction: { x (ms), y (cumulative AUD) }
- * buyPoints      – same entries for BUY/DRP trades, plus transaction metadata + size
- * sellPoints     – same for SELL trades
+ * Returns { lineData, buyPoints, drpPoints, cashDivPoints, sellPoints }.
+ * lineData       – { x (ms), y (cumulative AUD) } — steps change on BUY/DRP/SELL only
+ * *Points        – per-transaction markers with metadata + normalised size
+ * Cash dividends don't move cumulative capital; their marker y = current cumulative.
  */
 function buildCapitalDeployedSeries(transactions) {
   const relevant = transactions
-    .filter(t => isBuyType(t.movementType) || isSellType(t.movementType))
+    .filter(t => {
+      const mt = t.movementType
+      return isChartBuyOnly(mt) || isChartDRP(mt) || isChartSell(mt) || isChartCashDiv(mt)
+    })
     .sort((a, b) => toSortableDate(a.date) - toSortableDate(b.date))
 
-  // Pre-compute normalised dot sizes (min 4, max 20) across all trades
+  // Normalise dot sizes across all trades (min 4, max 20)
   const settlements = relevant.map(t => Math.abs(Number(t.settlementAmount) || 0))
   const minS   = settlements.length ? Math.min(...settlements) : 0
   const maxS   = settlements.length ? Math.max(...settlements) : 1
@@ -457,56 +482,65 @@ function buildCapitalDeployedSeries(transactions) {
   const normSize = s => 4 + ((s - minS) / sRange) * 16
 
   let cumulative = 0
-  const lineData  = []
-  const buyPoints  = []
-  const sellPoints = []
+  const lineData     = []
+  const buyPoints    = []
+  const drpPoints    = []
+  const cashDivPoints = []
+  const sellPoints   = []
 
   for (const t of relevant) {
+    const mt         = t.movementType
     const settlement = Math.abs(Number(t.settlementAmount) || 0)
-    if (isBuyType(t.movementType))       cumulative += settlement
-    else if (isSellType(t.movementType)) cumulative -= settlement
 
-    const x = toSortableDate(t.date)
+    if      (isChartBuyOnly(mt)) cumulative += settlement
+    else if (isChartDRP(mt))     cumulative += settlement
+    else if (isChartSell(mt))    cumulative -= settlement
+    // cash dividends: no change to cumulative
+
+    const x    = toSortableDate(t.date)
     const base = {
       x,
-      y:              cumulative,
-      dateStr:        fmtDate(t.date),
-      code:           t.code,
-      movementType:   t.movementType,
-      quantity:       Math.abs(Number(t.quantity) || 0),
+      y:               cumulative,
+      dateStr:         fmtDate(t.date),
+      code:            t.code,
+      movementType:    mt,
+      quantity:        Math.abs(Number(t.quantity) || 0),
       transactionPrice: t.transactionPrice,
       settlementAmount: t.settlementAmount,
-      size:           normSize(settlement),
+      size:            normSize(settlement),
     }
 
-    lineData.push({ x, y: cumulative })
-    if (isBuyType(t.movementType)) buyPoints.push(base)
-    else                           sellPoints.push(base)
+    // Only capital-moving events update the step line
+    if (!isChartCashDiv(mt)) lineData.push({ x, y: cumulative })
+
+    if      (isChartBuyOnly(mt)) buyPoints.push(base)
+    else if (isChartDRP(mt))     drpPoints.push(base)
+    else if (isChartCashDiv(mt)) cashDivPoints.push(base)
+    else                         sellPoints.push(base)
   }
 
-  return { lineData, buyPoints, sellPoints }
+  return { lineData, buyPoints, drpPoints, cashDivPoints, sellPoints }
 }
 
-// Custom diamond shape for Scatter — upward orientation for BUY, downward for SELL
-function DiamondShape({ cx, cy, payload, fill }) {
+// Diamond marker — symmetric rhombus, sized from payload.size
+function DiamondShape({ cx, cy, payload, fill, stroke = 'none' }) {
   if (cx == null || cy == null) return null
-  const s = payload?.size ?? 8
-  const hw = s * 0.55 // half-width
-  const hh = s * 0.75 // half-height
+  const s  = payload?.size ?? 8
+  const hw = s * 0.55
+  const hh = s * 0.75
   const pts = `${cx},${cy - hh} ${cx + hw},${cy} ${cx},${cy + hh} ${cx - hw},${cy}`
-  return <polygon points={pts} fill={fill} opacity={0.85} stroke="none" />
+  return <polygon points={pts} fill={fill} stroke={stroke} strokeWidth={1} opacity={0.9} />
 }
 
-function BuyDiamond(props)  { return <DiamondShape {...props} fill="#4ade80" /> }
-function SellDiamond(props) { return <DiamondShape {...props} fill="#f87171" /> }
+function BuyDiamond(props)     { return <DiamondShape {...props} fill="#4ade80" /> }
+function SellDiamond(props)    { return <DiamondShape {...props} fill="#f87171" /> }
+function DRPDiamond(props)     { return <DiamondShape {...props} fill="#60a5fa" /> }
+function CashDivDiamond(props) { return <DiamondShape {...props} fill="#111827" stroke="#d1d5db" /> }
 
 function ChartTooltip({ active, payload }) {
   if (!active || !payload?.length) return null
-
-  // Find scatter payload (has 'code'); fall back to line payload
   const scatter = payload.find(p => p.payload?.code)
   if (!scatter) return null
-
   const d = scatter.payload
   return (
     <div style={{
@@ -525,18 +559,21 @@ function ChartTooltip({ active, payload }) {
 }
 
 function CapitalDeployedChart({ transactions }) {
-  const { lineData, buyPoints, sellPoints } = buildCapitalDeployedSeries(transactions)
+  const { lineData, buyPoints, drpPoints, cashDivPoints, sellPoints } =
+    buildCapitalDeployedSeries(transactions)
 
   if (!lineData.length) return null
 
-  const yTickFmt = v => '$' + (v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v.toFixed(0))
+  const yTickFmt = v => '$' + (v >= 1_000_000
+    ? (v / 1_000_000).toFixed(1) + 'm'
+    : v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v.toFixed(0))
 
   return (
     <div className="rounded-2xl border border-gray-800 bg-gray-900 p-6">
       <h3 className="mb-6 text-sm font-semibold uppercase tracking-widest text-gray-400">
         Cumulative Capital Deployed Over Time
       </h3>
-      <ResponsiveContainer width="100%" height={380}>
+      <ResponsiveContainer width="100%" height={420}>
         <ComposedChart margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
           <XAxis
@@ -564,7 +601,7 @@ function CapitalDeployedChart({ transactions }) {
           <Line
             data={lineData}
             dataKey="y"
-            type="monotone"
+            type="stepAfter"
             stroke="#3b82f6"
             strokeWidth={2}
             dot={false}
@@ -572,19 +609,18 @@ function CapitalDeployedChart({ transactions }) {
             name="Cumulative Capital"
             legendType="line"
           />
-          <Scatter
-            data={buyPoints}
-            dataKey="y"
-            shape={<BuyDiamond />}
-            name="BUY / DRP"
-            legendType="diamond"
-          />
-          <Scatter
-            data={sellPoints}
-            dataKey="y"
-            shape={<SellDiamond />}
-            name="SELL"
-            legendType="diamond"
+          <Scatter data={buyPoints}     dataKey="y" shape={<BuyDiamond />}     name="BUY"          legendType="diamond" />
+          <Scatter data={sellPoints}    dataKey="y" shape={<SellDiamond />}    name="SELL"         legendType="diamond" />
+          <Scatter data={cashDivPoints} dataKey="y" shape={<CashDivDiamond />} name="Cash Dividend" legendType="diamond" />
+          <Scatter data={drpPoints}     dataKey="y" shape={<DRPDiamond />}     name="DRP"          legendType="diamond" />
+          <Brush
+            dataKey="x"
+            data={lineData}
+            tickFormatter={v => fmtDate(new Date(v))}
+            height={28}
+            stroke="#374151"
+            fill="#111827"
+            travellerWidth={6}
           />
         </ComposedChart>
       </ResponsiveContainer>
