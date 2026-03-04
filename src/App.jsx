@@ -651,6 +651,12 @@ function nabtradeTicker(code) {
  * CORS failures are caught and warned per ticker; the rest still resolve.
  */
 async function fetchHistoricalPrices(transactions) {
+  // Proxy only works on Netlify; skip gracefully in local dev
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    console.warn('[prices] Skipping price fetch in local dev (Netlify proxy not available).')
+    return {}
+  }
+
   const tickers = [...new Set(
     transactions.map(t => nabtradeTicker(t.code)).filter(Boolean),
   )]
@@ -664,13 +670,13 @@ async function fetchHistoricalPrices(transactions) {
 
   const settled = await Promise.allSettled(
     tickers.map(async (ticker) => {
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1mo&range=20y`
+      const url = `/.netlify/functions/prices?ticker=${encodeURIComponent(ticker)}`
 
       let res
       try {
         res = await fetch(url)
       } catch (err) {
-        console.warn(`[prices] CORS/network error – ${ticker}:`, err.message)
+        console.warn(`[prices] Network error – ${ticker}:`, err.message)
         return [ticker, null]
       }
 
