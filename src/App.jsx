@@ -1133,6 +1133,44 @@ function buildPortfolioValueSeries(transactions, priceData) {
       .filter(t => isBuyType(t.movementType))
       .sort((a, b) => toSortableDate(a.date) - toSortableDate(b.date))
 
+    // ── DEBUG: log VGS price range to detect near-zero prices ──────────────
+    const vgsPriceValues = Object.values(vgsPrices)
+    const vgsPriceMin = Math.min(...vgsPriceValues)
+    const vgsPriceMax = Math.max(...vgsPriceValues)
+    console.group('[Benchmark DEBUG] VGS.AX price data')
+    console.log(`Price range: $${vgsPriceMin.toFixed(2)} – $${vgsPriceMax.toFixed(2)} over ${vgsPriceValues.length} months`)
+    const nearZero = vgsPriceValues.filter(p => p < 1)
+    if (nearZero.length) console.warn('⚠️  Near-zero prices found:', nearZero)
+    else console.log('✅  No near-zero prices')
+    console.groupEnd()
+
+    // ── DEBUG: per-BUY transaction log ─────────────────────────────────────
+    console.group('[Benchmark DEBUG] BUY transactions → hypothetical VGS units')
+    console.log('Note: SELLs are NOT currently reducing VGS units (pure buy-and-hold benchmark)')
+    let runningUnits = 0
+    for (const t of buyTx) {
+      const settlement = Math.abs(Number(t.settlementAmount) || 0)
+      const txMs = toSortableDate(t.date)
+      const price = getNearestVgsPrice(txMs)
+      // Find which month key was actually used
+      let closestMs = vgsMsSorted[0], minDiff = Math.abs(txMs - closestMs)
+      for (const v of vgsMsSorted) {
+        const diff = Math.abs(txMs - v)
+        if (diff < minDiff) { minDiff = diff; closestMs = v }
+      }
+      const daysDiff = Math.round(minDiff / 86400000)
+      const units = (price && price > 0 && settlement > 0) ? settlement / price : 0
+      runningUnits += units
+      const flag = units > 10000 ? '🚨 UNREALISTIC' : units > 1000 ? '⚠️ HIGH' : ''
+      console.log(
+        `${fmtDate(t.date)}  ${t.code.padEnd(8)}  settlement=$${settlement.toFixed(2).padStart(10)}` +
+        `  VGS price=$${price?.toFixed(2).padStart(7) ?? 'NULL'}` +
+        `  (nearest month ${daysDiff}d away: ${new Date(closestMs).toLocaleDateString('en-AU')})` +
+        `  units=${units.toFixed(4).padStart(12)}  cumUnits=${runningUnits.toFixed(4).padStart(14)}  ${flag}`
+      )
+    }
+    console.groupEnd()
+
     for (const pt of lineData) {
       // Apply all BUY transactions up to this month-end
       while (bTxIdx < buyTx.length) {
@@ -1149,6 +1187,20 @@ function buildPortfolioValueSeries(transactions, priceData) {
       const monthPrice = vgsPrices[pt.x] ?? getNearestVgsPrice(pt.x)
       pt.bench = monthPrice && monthPrice > 0 ? vgsUnits * monthPrice : null
     }
+
+    // ── DEBUG: benchmark series first/last 10 rows ─────────────────────────
+    console.group('[Benchmark DEBUG] Benchmark series (first & last 10 rows)')
+    console.log(`Total rows: ${lineData.length}  |  Final VGS units held: ${vgsUnits.toFixed(4)}`)
+    const fmtRow = pt =>
+      `${fmtDate(new Date(pt.x))}  portfolio=$${(pt.y ?? 0).toFixed(0).padStart(10)}` +
+      `  bench=${pt.bench != null ? '$' + pt.bench.toFixed(0).padStart(10) : '        null'}`
+    console.log('--- First 10 ---')
+    lineData.slice(0, 10).forEach(pt => console.log(fmtRow(pt)))
+    if (lineData.length > 10) {
+      console.log('--- Last 10 ---')
+      lineData.slice(-10).forEach(pt => console.log(fmtRow(pt)))
+    }
+    console.groupEnd()
   }
 
   // ── 3b. Scatter markers — placed at nearest prior monthly portfolio value ────
