@@ -1,6 +1,7 @@
 import React, { useState, useCallback } from 'react'
 import {
-  ComposedChart, Line, Scatter, XAxis, YAxis, CartesianGrid,
+  ComposedChart, AreaChart, Area,
+  Line, Scatter, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, Legend, Brush,
 } from 'recharts'
 
@@ -1109,6 +1110,130 @@ function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTic
 }
 
 // ---------------------------------------------------------------------------
+// Stage 9: Returns Breakdown AreaChart
+// ---------------------------------------------------------------------------
+
+function ReturnBreakdownTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (!d) return null
+  const total = (d.unrealised ?? 0) + (d.realised ?? 0) + (d.dividends ?? 0) + (d.drp ?? 0)
+  const row = (label, value, color) => (
+    <p key={label} style={{ color, margin: 0 }}>
+      {label}: <strong>{fmtAUD(value)}</strong>
+    </p>
+  )
+  return (
+    <div style={{
+      background: '#1f2937', border: '1px solid #374151',
+      borderRadius: 8, padding: '10px 14px',
+      fontSize: 12, color: '#f3f4f6', lineHeight: 1.9,
+    }}>
+      <p style={{ fontWeight: 700, marginBottom: 4 }}>{fmtDate(new Date(d.x))}</p>
+      {row('Unrealised P&L', d.unrealised, '#a78bfa')}
+      {row('Realised P&L',   d.realised,   '#4ade80')}
+      {row('Dividends',      d.dividends,  '#60a5fa')}
+      {row('DRP',            d.drp,        '#2dd4bf')}
+      <p style={{ borderTop: '1px solid #374151', marginTop: 6, paddingTop: 6, fontWeight: 700 }}>
+        Total: {fmtAUD(total)}
+      </p>
+    </div>
+  )
+}
+
+function ReturnBreakdownChart({ returnSeries, pricesLoading }) {
+  if (pricesLoading) {
+    return (
+      <div
+        className="rounded-2xl border border-gray-800 bg-gray-900 p-6 flex items-center justify-center"
+        style={{ minHeight: 200 }}
+      >
+        <div className="flex flex-col items-center gap-3">
+          <div className="animate-spin h-8 w-8 rounded-full border-2 border-t-transparent border-blue-500" />
+          <p className="text-sm text-gray-400">Loading historical prices…</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!returnSeries?.length) return null
+
+  const yTickFmt = v => '$' + (v >= 1_000_000
+    ? (v / 1_000_000).toFixed(1) + 'm'
+    : v <= -1_000_000 ? '-' + (Math.abs(v) / 1_000_000).toFixed(1) + 'm'
+    : v >= 1000 ? (v / 1000).toFixed(0) + 'k'
+    : v <= -1000 ? '-' + (Math.abs(v) / 1000).toFixed(0) + 'k'
+    : v.toFixed(0))
+
+  return (
+    <div className="rounded-2xl border border-gray-800 bg-gray-900 p-6 space-y-4">
+      <h3 className="text-sm font-semibold uppercase tracking-widest text-gray-400">
+        Returns Breakdown Over Time
+      </h3>
+      <ResponsiveContainer width="100%" height={420}>
+        <AreaChart data={returnSeries} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}
+          stackOffset="sign"
+        >
+          <defs>
+            <linearGradient id="gradUnrealised" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%"  stopColor="#a78bfa" stopOpacity={0.35} />
+              <stop offset="95%" stopColor="#a78bfa" stopOpacity={0.05} />
+            </linearGradient>
+            <linearGradient id="gradRealised" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%"  stopColor="#4ade80" stopOpacity={0.35} />
+              <stop offset="95%" stopColor="#4ade80" stopOpacity={0.05} />
+            </linearGradient>
+            <linearGradient id="gradDividends" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%"  stopColor="#60a5fa" stopOpacity={0.35} />
+              <stop offset="95%" stopColor="#60a5fa" stopOpacity={0.05} />
+            </linearGradient>
+            <linearGradient id="gradDrp" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%"  stopColor="#2dd4bf" stopOpacity={0.35} />
+              <stop offset="95%" stopColor="#2dd4bf" stopOpacity={0.05} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <XAxis
+            dataKey="x"
+            type="number"
+            domain={['dataMin', 'dataMax']}
+            scale="time"
+            tickFormatter={v => fmtDate(new Date(v))}
+            tick={{ fill: '#6b7280', fontSize: 11 }}
+            axisLine={{ stroke: '#374151' }}
+            tickLine={false}
+            tickCount={8}
+          />
+          <YAxis
+            tickFormatter={yTickFmt}
+            tick={{ fill: '#6b7280', fontSize: 11 }}
+            axisLine={{ stroke: '#374151' }}
+            tickLine={false}
+            width={60}
+          />
+          <Tooltip content={<ReturnBreakdownTooltip />} />
+          <Legend
+            formatter={v => <span style={{ color: '#9ca3af', fontSize: 12 }}>{v}</span>}
+          />
+          <Area dataKey="drp"        type="monotone" stroke="#2dd4bf" fill="url(#gradDrp)"        strokeWidth={1.5} name="DRP"           stackId="stack" />
+          <Area dataKey="dividends"  type="monotone" stroke="#60a5fa" fill="url(#gradDividends)"  strokeWidth={1.5} name="Dividends"     stackId="stack" />
+          <Area dataKey="realised"   type="monotone" stroke="#4ade80" fill="url(#gradRealised)"   strokeWidth={1.5} name="Realised P&L"  stackId="stack" />
+          <Area dataKey="unrealised" type="monotone" stroke="#a78bfa" fill="url(#gradUnrealised)" strokeWidth={1.5} name="Unrealised P&L" stackId="stack" />
+          <Brush
+            dataKey="x"
+            tickFormatter={v => fmtDate(new Date(v))}
+            height={28}
+            stroke="#374151"
+            fill="#111827"
+            travellerWidth={6}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Yahoo Finance historical price fetching
 // ---------------------------------------------------------------------------
 
@@ -1293,6 +1418,10 @@ export default function App() {
             priceData={priceData}
             pricesLoading={pricesLoading}
             failedTickers={failedTickers}
+          />
+          <ReturnBreakdownChart
+            returnSeries={returnSeries}
+            pricesLoading={pricesLoading}
           />
         </main>
       ) : (
