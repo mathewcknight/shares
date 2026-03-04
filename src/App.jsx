@@ -812,6 +812,40 @@ function ChartTooltip({ active, payload }) {
   )
 }
 
+function PortfolioValueTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+
+  // Scatter point hover — show transaction details
+  const scatter = payload.find(p => p.payload?.code)
+  if (scatter) {
+    const d = scatter.payload
+    return (
+      <div style={{ background: '#1f2937', border: '1px solid #374151', borderRadius: 8, padding: '10px 14px', fontSize: 12, color: '#f3f4f6', lineHeight: 1.8 }}>
+        <p style={{ fontWeight: 700, marginBottom: 4 }}>{d.dateStr}</p>
+        <p>Code: <strong>{d.code}</strong></p>
+        <p>Type: {d.movementType}</p>
+        <p>Qty: {d.quantity?.toLocaleString('en-AU')}</p>
+        <p>Price: {fmtAUD(d.transactionPrice)}</p>
+        <p>Settlement: {fmtAUD(d.settlementAmount)}</p>
+      </div>
+    )
+  }
+
+  // Line hover — show portfolio value and benchmark
+  const pt = payload.find(p => p.dataKey === 'y' || p.dataKey === 'bench')
+  if (!pt) return null
+  const d = pt.payload
+  return (
+    <div style={{ background: '#1f2937', border: '1px solid #374151', borderRadius: 8, padding: '10px 14px', fontSize: 12, color: '#f3f4f6', lineHeight: 1.9 }}>
+      <p style={{ fontWeight: 700, marginBottom: 4 }}>{fmtDate(new Date(d.x))}</p>
+      <p style={{ color: '#a78bfa' }}>Portfolio Value: <strong>{fmtAUD(d.y)}</strong></p>
+      {d.bench != null && (
+        <p style={{ color: '#fb923c' }}>VGS Benchmark: <strong>{fmtAUD(d.bench)}</strong></p>
+      )}
+    </div>
+  )
+}
+
 function CapitalDeployedChart({ transactions }) {
   const { lineData, buyPoints, drpPoints, cashDivPoints, sellPoints } =
     buildCapitalDeployedSeries(transactions)
@@ -983,11 +1017,17 @@ function buildReturnComponentSeries(transactions, dividends, priceData) {
     result.push({ x: ms, unrealised, realised: cumRealised, dividends: cumDividends, drp: cumDrp })
   }
 
+  const isNearZero = r =>
+    Math.abs(r.unrealised) + Math.abs(r.realised) + Math.abs(r.dividends) + Math.abs(r.drp) < 1
+
   // Trim leading all-zero rows
-  const firstActive = result.findIndex(
-    r => r.unrealised !== 0 || r.realised !== 0 || r.dividends !== 0 || r.drp !== 0,
-  )
-  const trimmed = firstActive >= 0 ? result.slice(firstActive) : result
+  const firstActive = result.findIndex(r => !isNearZero(r))
+  const afterLeadTrim = firstActive >= 0 ? result.slice(firstActive) : result
+
+  // Trim trailing near-zero rows (missing prices at tail)
+  let lastActive = afterLeadTrim.length - 1
+  while (lastActive > 0 && isNearZero(afterLeadTrim[lastActive])) lastActive--
+  const trimmed = afterLeadTrim.slice(0, lastActive + 1)
 
   // Console diagnostics
   const fmt = r => `  ${new Date(r.x).toLocaleDateString('en-AU')}` +
@@ -1064,16 +1104,54 @@ function buildPortfolioValueSeries(transactions, priceData) {
     rawLine.push({ x: ms, y: value })
   }
 
-  // Trim leading zeros (before first buy) and trailing zeros (after full exit)
+  // Trim leading zeros (before first buy) and trailing zeros / missing-price rows
   const firstNonZero = rawLine.findIndex(p => p.y > 0)
   if (firstNonZero < 0) return empty
   let lastNonZero = rawLine.length - 1
-  while (lastNonZero > firstNonZero && rawLine[lastNonZero].y === 0) lastNonZero--
+  while (lastNonZero > firstNonZero && rawLine[lastNonZero].y < 1) lastNonZero--
   const lineData = rawLine.slice(firstNonZero, lastNonZero + 1)
 
   if (!lineData.length) return empty
 
-  // ── 3. Scatter markers — placed at nearest prior monthly portfolio value ────
+  // ── 3a. VGS benchmark — replay BUY transactions as hypothetical VGS purchases
+  const vgsPrices = priceData['VGS.AX']
+  if (vgsPrices && Object.keys(vgsPrices).length) {
+    const vgsMsSorted = Object.keys(vgsPrices).map(Number).sort((a, b) => a - b)
+
+    const getNearestVgsPrice = (ms) => {
+      let closest = vgsMsSorted[0], minDiff = Math.abs(ms - closest)
+      for (const v of vgsMsSorted) {
+        const diff = Math.abs(ms - v)
+        if (diff < minDiff) { minDiff = diff; closest = v }
+      }
+      return vgsPrices[closest] ?? null
+    }
+
+    let vgsUnits = 0
+    let bTxIdx = 0
+    const buyTx = [...transactions]
+      .filter(t => isBuyType(t.movementType))
+      .sort((a, b) => toSortableDate(a.date) - toSortableDate(b.date))
+
+    for (const pt of lineData) {
+      // Apply all BUY transactions up to this month-end
+      while (bTxIdx < buyTx.length) {
+        const t = buyTx[bTxIdx]
+        if (toSortableDate(t.date) > pt.x) break
+        const settlement = Math.abs(Number(t.settlementAmount) || 0)
+        if (settlement > 0) {
+          const price = getNearestVgsPrice(toSortableDate(t.date))
+          if (price && price > 0) vgsUnits += settlement / price
+        }
+        bTxIdx++
+      }
+      // Benchmark value = accumulated VGS units × this month's VGS price
+      const monthPrice = vgsPrices[pt.x] ?? getNearestVgsPrice(pt.x)
+      pt.bench = monthPrice && monthPrice > 0 ? vgsUnits * monthPrice : null
+    }
+  }
+
+  // ── 3b. Scatter markers — placed at nearest prior monthly portfolio value ────
   const relevant = [...transactions]
     .filter(t => {
       const mt = t.movementType
@@ -1124,6 +1202,8 @@ function buildPortfolioValueSeries(transactions, priceData) {
 }
 
 function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTickers }) {
+  const [brushDomain, setBrushDomain] = React.useState(null)
+
   if (pricesLoading) {
     return (
       <div
@@ -1131,9 +1211,7 @@ function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTic
         style={{ minHeight: 200 }}
       >
         <div className="flex flex-col items-center gap-3">
-          <div
-            className="animate-spin h-8 w-8 rounded-full border-2 border-t-transparent border-blue-500"
-          />
+          <div className="animate-spin h-8 w-8 rounded-full border-2 border-t-transparent border-blue-500" />
           <p className="text-sm text-gray-400">Loading historical prices…</p>
         </div>
       </div>
@@ -1147,9 +1225,19 @@ function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTic
 
   if (!lineData.length) return null
 
+  const hasBenchmark = lineData.some(p => p.bench != null)
+
   const yTickFmt = v => '$' + (v >= 1_000_000
     ? (v / 1_000_000).toFixed(1) + 'm'
     : v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v.toFixed(0))
+
+  const handleBrush = ({ startIndex, endIndex }) => {
+    if (startIndex == null || endIndex == null) return
+    setBrushDomain([lineData[startIndex].x, lineData[endIndex].x])
+  }
+
+  // Filter non-VGS failed tickers for display
+  const displayFailed = failedTickers.filter(t => t !== 'VGS.AX')
 
   return (
     <div className="rounded-2xl border border-gray-800 bg-gray-900 p-6 space-y-4">
@@ -1157,9 +1245,9 @@ function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTic
         Portfolio Market Value Over Time
       </h3>
 
-      {failedTickers.length > 0 && (
+      {displayFailed.length > 0 && (
         <p className="text-xs italic text-gray-500">
-          No price data for {failedTickers.join(', ')} — excluded from chart.
+          No price data for {displayFailed.join(', ')} — excluded from chart.
         </p>
       )}
 
@@ -1169,7 +1257,7 @@ function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTic
           <XAxis
             dataKey="x"
             type="number"
-            domain={['dataMin', 'dataMax']}
+            domain={brushDomain ?? ['dataMin', 'dataMax']}
             scale="time"
             tickFormatter={v => fmtDate(new Date(v))}
             tick={{ fill: '#6b7280', fontSize: 11 }}
@@ -1184,7 +1272,7 @@ function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTic
             tickLine={false}
             width={60}
           />
-          <Tooltip content={<ChartTooltip />} />
+          <Tooltip content={<PortfolioValueTooltip />} />
           <Legend
             formatter={v => <span style={{ color: '#9ca3af', fontSize: 12 }}>{v}</span>}
           />
@@ -1195,18 +1283,35 @@ function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTic
             stroke="#a78bfa"
             strokeWidth={2}
             dot={false}
-            activeDot={false}
+            activeDot={{ r: 4, fill: '#a78bfa' }}
             name="Portfolio Value"
             legendType="line"
           />
+          {hasBenchmark && (
+            <Line
+              data={lineData}
+              dataKey="bench"
+              type="monotone"
+              stroke="#fb923c"
+              strokeWidth={2}
+              strokeDasharray="5 3"
+              dot={false}
+              activeDot={{ r: 4, fill: '#fb923c' }}
+              name="VGS Benchmark"
+              legendType="line"
+              connectNulls
+            />
+          )}
           <Scatter data={buyPoints}     dataKey="y" shape={<BuyDiamond />}     name="BUY"           legendType="diamond" />
           <Scatter data={sellPoints}    dataKey="y" shape={<SellDiamond />}    name="SELL"          legendType="diamond" />
           <Scatter data={cashDivPoints} dataKey="y" shape={<CashDivDiamond />} name="Cash Dividend"  legendType="diamond" />
           <Scatter data={drpPoints}     dataKey="y" shape={<DRPDiamond />}     name="DRP"           legendType="diamond" />
           <Brush
-            dataKey="x"
             data={lineData}
-            tickFormatter={v => fmtDate(new Date(v))}
+            dataKey="y"
+            startIndex={0}
+            endIndex={lineData.length - 1}
+            onChange={handleBrush}
             height={28}
             stroke="#374151"
             fill="#111827"
@@ -1251,6 +1356,8 @@ function ReturnBreakdownTooltip({ active, payload, label }) {
 }
 
 function ReturnBreakdownChart({ returnSeries, pricesLoading }) {
+  const [brushDomain, setBrushDomain] = React.useState(null)
+
   if (pricesLoading) {
     return (
       <div
@@ -1266,6 +1373,11 @@ function ReturnBreakdownChart({ returnSeries, pricesLoading }) {
   }
 
   if (!returnSeries?.length) return null
+
+  const handleBrush = ({ startIndex, endIndex }) => {
+    if (startIndex == null || endIndex == null) return
+    setBrushDomain([returnSeries[startIndex].x, returnSeries[endIndex].x])
+  }
 
   const yTickFmt = v => '$' + (v >= 1_000_000
     ? (v / 1_000_000).toFixed(1) + 'm'
@@ -1305,7 +1417,7 @@ function ReturnBreakdownChart({ returnSeries, pricesLoading }) {
           <XAxis
             dataKey="x"
             type="number"
-            domain={['dataMin', 'dataMax']}
+            domain={brushDomain ?? ['dataMin', 'dataMax']}
             scale="time"
             tickFormatter={v => fmtDate(new Date(v))}
             tick={{ fill: '#6b7280', fontSize: 11 }}
@@ -1330,7 +1442,9 @@ function ReturnBreakdownChart({ returnSeries, pricesLoading }) {
           <Area dataKey="unrealised" type="monotone" stroke="#a78bfa" fill="url(#gradUnrealised)" strokeWidth={1.5} name="Unrealised P&L" stackId="stack" />
           <Brush
             dataKey="x"
-            tickFormatter={v => fmtDate(new Date(v))}
+            startIndex={0}
+            endIndex={returnSeries.length - 1}
+            onChange={handleBrush}
             height={28}
             stroke="#374151"
             fill="#111827"
@@ -1371,9 +1485,10 @@ async function fetchHistoricalPrices(transactions) {
     return { prices: {}, failed: [] }
   }
 
-  const tickers = [...new Set(
-    transactions.map(t => nabtradeTicker(t.code)).filter(Boolean),
-  )]
+  const tickers = [...new Set([
+    ...transactions.map(t => nabtradeTicker(t.code)).filter(Boolean),
+    'VGS.AX', // always fetch for benchmark
+  ])]
 
   if (!tickers.length) {
     console.log('[prices] No tickers found.')
