@@ -629,6 +629,228 @@ function CapitalDeployedChart({ transactions }) {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 7: Portfolio Market Value chart
+// ---------------------------------------------------------------------------
+
+/**
+ * For each month-end timestamp present in priceData, replay all transactions
+ * up to that point to get current holdings, then multiply by closing price.
+ * Tickers with no price data are silently skipped.
+ *
+ * Returns { lineData, buyPoints, drpPoints, cashDivPoints, sellPoints }
+ * lineData   – { x (ms), y (AUD portfolio value) } trimmed to first non-zero
+ * *Points    – transaction markers placed at nearest prior monthly y value
+ */
+function buildPortfolioValueSeries(transactions, priceData) {
+  const empty = { lineData: [], buyPoints: [], drpPoints: [], cashDivPoints: [], sellPoints: [] }
+
+  if (!priceData || !Object.keys(priceData).length) return empty
+
+  // ── 1. Union of all month timestamps across loaded tickers ─────────────────
+  const allMs = new Set()
+  for (const priceMap of Object.values(priceData)) {
+    for (const ms of Object.keys(priceMap)) allMs.add(Number(ms))
+  }
+  const sortedMonths = [...allMs].sort((a, b) => a - b)
+  if (!sortedMonths.length) return empty
+
+  // ── 2. Walk transactions (chronological) with a running holdings map ───────
+  const sorted = [...transactions].sort(
+    (a, b) => toSortableDate(a.date) - toSortableDate(b.date),
+  )
+
+  const holdings = {} // yahooTicker → qty
+  let txIdx = 0
+  const rawLine = []
+
+  for (const ms of sortedMonths) {
+    // Advance pointer: apply every transaction with date ≤ ms
+    while (txIdx < sorted.length) {
+      const t = sorted[txIdx]
+      if (toSortableDate(t.date) > ms) break
+      const ticker = nabtradeTicker(t.code)
+      if (ticker) {
+        if (!holdings[ticker]) holdings[ticker] = 0
+        const qty = Math.abs(Number(t.quantity) || 0)
+        if (isBuyType(t.movementType))        holdings[ticker] += qty
+        else if (isSellType(t.movementType))  holdings[ticker] = Math.max(0, holdings[ticker] - qty)
+      }
+      txIdx++
+    }
+
+    // Sum market value for this month
+    let value = 0
+    for (const [ticker, qty] of Object.entries(holdings)) {
+      if (qty <= 0) continue
+      const price = priceData[ticker]?.[ms]
+      if (price != null) value += qty * price
+    }
+    rawLine.push({ x: ms, y: value })
+  }
+
+  // Trim leading zeros (before portfolio had any value)
+  const firstNonZero = rawLine.findIndex(p => p.y > 0)
+  const lineData = firstNonZero >= 0 ? rawLine.slice(firstNonZero) : []
+
+  if (!lineData.length) return empty
+
+  // ── 3. Scatter markers — placed at nearest prior monthly portfolio value ────
+  const relevant = [...transactions]
+    .filter(t => {
+      const mt = t.movementType
+      return isChartBuyOnly(mt) || isChartDRP(mt) || isChartSell(mt) || isChartCashDiv(mt)
+    })
+    .sort((a, b) => toSortableDate(a.date) - toSortableDate(b.date))
+
+  // For a given tx timestamp, return the most recent lineData y at or before it
+  const getValueAt = (txMs) => {
+    let val = 0
+    for (const pt of lineData) {
+      if (pt.x <= txMs) val = pt.y
+      else break
+    }
+    return val
+  }
+
+  const settlements = relevant.map(t => Math.abs(Number(t.settlementAmount) || 0))
+  const minS   = settlements.length ? Math.min(...settlements) : 0
+  const maxS   = settlements.length ? Math.max(...settlements) : 1
+  const sRange = maxS - minS || 1
+  const normSize = s => 4 + ((s - minS) / sRange) * 16
+
+  const buyPoints = [], drpPoints = [], cashDivPoints = [], sellPoints = []
+
+  for (const t of relevant) {
+    const mt         = t.movementType
+    const settlement = Math.abs(Number(t.settlementAmount) || 0)
+    const x          = toSortableDate(t.date)
+    const base = {
+      x,
+      y:                getValueAt(x),
+      dateStr:          fmtDate(t.date),
+      code:             t.code,
+      movementType:     mt,
+      quantity:         Math.abs(Number(t.quantity) || 0),
+      transactionPrice: t.transactionPrice,
+      settlementAmount: t.settlementAmount,
+      size:             normSize(settlement),
+    }
+    if      (isChartBuyOnly(mt)) buyPoints.push(base)
+    else if (isChartDRP(mt))     drpPoints.push(base)
+    else if (isChartCashDiv(mt)) cashDivPoints.push(base)
+    else                         sellPoints.push(base)
+  }
+
+  return { lineData, buyPoints, drpPoints, cashDivPoints, sellPoints }
+}
+
+function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTickers }) {
+  if (pricesLoading) {
+    return (
+      <div
+        className="rounded-2xl border border-gray-800 bg-gray-900 p-6 flex items-center justify-center"
+        style={{ minHeight: 200 }}
+      >
+        <div className="flex flex-col items-center gap-3">
+          <div
+            className="animate-spin h-8 w-8 rounded-full border-2 border-t-transparent border-blue-500"
+          />
+          <p className="text-sm text-gray-400">Loading historical prices…</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!priceData || !Object.keys(priceData).length) return null
+
+  const { lineData, buyPoints, drpPoints, cashDivPoints, sellPoints } =
+    buildPortfolioValueSeries(transactions, priceData)
+
+  if (!lineData.length) return null
+
+  const yTickFmt = v => '$' + (v >= 1_000_000
+    ? (v / 1_000_000).toFixed(1) + 'm'
+    : v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v.toFixed(0))
+
+  return (
+    <div className="rounded-2xl border border-gray-800 bg-gray-900 p-6 space-y-4">
+      <h3 className="text-sm font-semibold uppercase tracking-widest text-gray-400">
+        Portfolio Market Value Over Time
+      </h3>
+
+      {failedTickers.length > 0 && (
+        <div
+          className="flex items-start gap-3 rounded-xl border px-4 py-3"
+          style={{ backgroundColor: 'rgba(69,40,10,0.4)', borderColor: '#92400e' }}
+        >
+          <div className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-amber-600 text-xs text-white mt-0.5">
+            !
+          </div>
+          <div>
+            <p className="text-sm font-medium text-amber-300">Price data unavailable for some tickers</p>
+            <p className="text-xs text-gray-400 mt-0.5">
+              Excluded from chart: <strong>{failedTickers.join(', ')}</strong>
+            </p>
+          </div>
+        </div>
+      )}
+
+      <ResponsiveContainer width="100%" height={420}>
+        <ComposedChart margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <XAxis
+            dataKey="x"
+            type="number"
+            domain={['dataMin', 'dataMax']}
+            scale="time"
+            tickFormatter={v => fmtDate(new Date(v))}
+            tick={{ fill: '#6b7280', fontSize: 11 }}
+            axisLine={{ stroke: '#374151' }}
+            tickLine={false}
+            tickCount={8}
+          />
+          <YAxis
+            tickFormatter={yTickFmt}
+            tick={{ fill: '#6b7280', fontSize: 11 }}
+            axisLine={{ stroke: '#374151' }}
+            tickLine={false}
+            width={60}
+          />
+          <Tooltip content={<ChartTooltip />} />
+          <Legend
+            formatter={v => <span style={{ color: '#9ca3af', fontSize: 12 }}>{v}</span>}
+          />
+          <Line
+            data={lineData}
+            dataKey="y"
+            type="monotone"
+            stroke="#a78bfa"
+            strokeWidth={2}
+            dot={false}
+            activeDot={false}
+            name="Portfolio Value"
+            legendType="line"
+          />
+          <Scatter data={buyPoints}     dataKey="y" shape={<BuyDiamond />}     name="BUY"           legendType="diamond" />
+          <Scatter data={sellPoints}    dataKey="y" shape={<SellDiamond />}    name="SELL"          legendType="diamond" />
+          <Scatter data={cashDivPoints} dataKey="y" shape={<CashDivDiamond />} name="Cash Dividend"  legendType="diamond" />
+          <Scatter data={drpPoints}     dataKey="y" shape={<DRPDiamond />}     name="DRP"           legendType="diamond" />
+          <Brush
+            dataKey="x"
+            data={lineData}
+            tickFormatter={v => fmtDate(new Date(v))}
+            height={28}
+            stroke="#374151"
+            fill="#111827"
+            travellerWidth={6}
+          />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Yahoo Finance historical price fetching
 // ---------------------------------------------------------------------------
 
@@ -654,7 +876,7 @@ async function fetchHistoricalPrices(transactions) {
   // Proxy only works on Netlify; skip gracefully in local dev
   if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
     console.warn('[prices] Skipping price fetch in local dev (Netlify proxy not available).')
-    return {}
+    return { prices: {}, failed: [] }
   }
 
   const tickers = [...new Set(
@@ -663,7 +885,7 @@ async function fetchHistoricalPrices(transactions) {
 
   if (!tickers.length) {
     console.log('[prices] No tickers found.')
-    return {}
+    return { prices: {}, failed: [] }
   }
 
   console.log(`[prices] Fetching ${tickers.length} tickers:`, tickers)
@@ -704,19 +926,28 @@ async function fetchHistoricalPrices(transactions) {
     }),
   )
 
-  const priceData = {}
+  const prices = {}
+  const failed = []
   for (const r of settled) {
-    if (r.status !== 'fulfilled' || !r.value?.[1]) continue
+    if (r.status !== 'fulfilled') {
+      // Promise itself rejected — shouldn't normally happen given our try/catch above
+      continue
+    }
     const [ticker, priceMap] = r.value
-    priceData[ticker] = priceMap
+    if (!priceMap) {
+      failed.push(ticker)
+      continue
+    }
+    prices[ticker] = priceMap
     const ms   = Object.keys(priceMap).map(Number)
     const from = new Date(Math.min(...ms)).toLocaleDateString('en-AU')
     const to   = new Date(Math.max(...ms)).toLocaleDateString('en-AU')
     console.log(`[prices] ${ticker}: ${ms.length} months  ${from} → ${to}`)
   }
 
-  console.log('[prices] Done. Loaded:', Object.keys(priceData).join(', ') || '(none)')
-  return priceData
+  console.log('[prices] Done. Loaded:', Object.keys(prices).join(', ') || '(none)')
+  if (failed.length) console.warn('[prices] Failed:', failed.join(', '))
+  return { prices, failed }
 }
 
 // ---------------------------------------------------------------------------
@@ -724,27 +955,37 @@ async function fetchHistoricalPrices(transactions) {
 // ---------------------------------------------------------------------------
 
 export default function App() {
-  const [fileName, setFileName]     = useState(null)
-  const [isDragging, setIsDragging] = useState(false)
-  const [parsed, setParsed]         = useState(null)
-  const [parseError, setParseError] = useState(null)
+  const [fileName, setFileName]         = useState(null)
+  const [isDragging, setIsDragging]     = useState(false)
+  const [parsed, setParsed]             = useState(null)
+  const [parseError, setParseError]     = useState(null)
+  const [pricesLoading, setPricesLoading] = useState(false)
+  const [priceData, setPriceData]         = useState(null)
+  const [failedTickers, setFailedTickers] = useState([])
 
   const handleFile = (file) => {
     if (!file || !file.name.endsWith('.xlsx')) return
     setFileName(file.name)
     setParseError(null)
+    setPriceData(null)
+    setFailedTickers([])
 
     const reader = new FileReader()
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const data = parseWorkbook(e.target.result)
         const metrics = calculateMetrics(data)
         logMetrics(metrics)
         setParsed({ ...data, metrics })
-        fetchHistoricalPrices(data.transactions)  // fire-and-forget; results logged to console
+        setPricesLoading(true)
+        const { prices, failed } = await fetchHistoricalPrices(data.transactions)
+        setPriceData(prices)
+        setFailedTickers(failed)
       } catch (err) {
         console.error('Parse error:', err)
         setParseError(err.message)
+      } finally {
+        setPricesLoading(false)
       }
     }
     reader.readAsArrayBuffer(file)
@@ -782,6 +1023,12 @@ export default function App() {
         <main className="mx-auto max-w-7xl px-6 py-8 space-y-6">
           <SummaryCards summary={parsed.summary} metrics={parsed.metrics} />
           <CapitalDeployedChart transactions={parsed.transactions} />
+          <PortfolioValueChart
+            transactions={parsed.transactions}
+            priceData={priceData}
+            pricesLoading={pricesLoading}
+            failedTickers={failedTickers}
+          />
         </main>
       ) : (
         /* Upload screen */
