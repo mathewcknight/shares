@@ -1063,12 +1063,38 @@ function buildPortfolioValueSeries(transactions, priceData) {
   if (!priceData || !Object.keys(priceData).length) return empty
 
   // ── 1. Union of all month timestamps across loaded tickers ─────────────────
-  const allMs = new Set()
+  // Deduplicate by calendar year+month so tickers with slightly different
+  // day-of-month timestamps (e.g. VGS.AX vs ASX tickers) don't produce
+  // multiple entries for the same month.
+  const monthKeyMap = new Map() // "YYYY-M" → smallest ms seen for that month
   for (const priceMap of Object.values(priceData)) {
-    for (const ms of Object.keys(priceMap)) allMs.add(Number(ms))
+    for (const ms of Object.keys(priceMap)) {
+      const msNum = Number(ms)
+      const d = new Date(msNum)
+      const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}`
+      if (!monthKeyMap.has(key) || msNum < monthKeyMap.get(key)) monthKeyMap.set(key, msNum)
+    }
   }
-  const sortedMonths = [...allMs].sort((a, b) => a - b)
+  const sortedMonths = [...monthKeyMap.values()].sort((a, b) => a - b)
   if (!sortedMonths.length) return empty
+
+  // Build per-ticker sorted timestamp arrays for nearest-price lookups,
+  // since the canonical month timestamp may not exactly match a ticker's key.
+  const tickerMsSorted = {}
+  for (const [ticker, priceMap] of Object.entries(priceData)) {
+    tickerMsSorted[ticker] = Object.keys(priceMap).map(Number).sort((a, b) => a - b)
+  }
+  const getNearestPrice = (ticker, ms) => {
+    const sorted = tickerMsSorted[ticker]
+    if (!sorted?.length) return null
+    let closest = sorted[0], minDiff = Math.abs(ms - closest)
+    for (const v of sorted) {
+      const diff = Math.abs(ms - v)
+      if (diff < minDiff) { minDiff = diff; closest = v }
+      else break // sorted array — once diff grows we've passed the nearest
+    }
+    return priceData[ticker][closest] ?? null
+  }
 
   // ── 2. Walk transactions (chronological) with a running holdings map ───────
   const sorted = [...transactions].sort(
@@ -1094,11 +1120,11 @@ function buildPortfolioValueSeries(transactions, priceData) {
       txIdx++
     }
 
-    // Sum market value for this month
+    // Sum market value for this month (nearest-price lookup per ticker)
     let value = 0
     for (const [ticker, qty] of Object.entries(holdings)) {
       if (qty <= 0) continue
-      const price = priceData[ticker]?.[ms]
+      const price = getNearestPrice(ticker, ms)
       if (price != null) value += qty * price
     }
     rawLine.push({ x: ms, y: value })
