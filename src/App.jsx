@@ -1,4 +1,8 @@
 import React, { useState, useCallback } from 'react'
+import {
+  ComposedChart, Line, Scatter, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, Legend,
+} from 'recharts'
 
 // ---------------------------------------------------------------------------
 // Parsing helpers
@@ -418,6 +422,177 @@ function SummaryCards({ summary, metrics }) {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 6: Cumulative Capital Deployed chart
+// ---------------------------------------------------------------------------
+
+function fmtDate(value) {
+  if (!value) return '—'
+  if (value instanceof Date) {
+    return value.toLocaleDateString('en-AU', { day: '2-digit', month: '2-digit', year: 'numeric' })
+  }
+  // Excel serial number (days since 1900-01-01, with Lotus 1-2-3 leap-year bug)
+  if (typeof value === 'number') {
+    const d = new Date(Math.round((value - 25569) * 86400 * 1000))
+    return d.toLocaleDateString('en-AU', { day: '2-digit', month: '2-digit', year: 'numeric' })
+  }
+  return String(value)
+}
+
+/**
+ * Returns { lineData, buyPoints, sellPoints } for the chart.
+ * lineData       – one entry per buy/sell transaction: { x (ms), y (cumulative AUD) }
+ * buyPoints      – same entries for BUY/DRP trades, plus transaction metadata + size
+ * sellPoints     – same for SELL trades
+ */
+function buildCapitalDeployedSeries(transactions) {
+  const relevant = transactions
+    .filter(t => isBuyType(t.movementType) || isSellType(t.movementType))
+    .sort((a, b) => toSortableDate(a.date) - toSortableDate(b.date))
+
+  // Pre-compute normalised dot sizes (min 4, max 20) across all trades
+  const settlements = relevant.map(t => Math.abs(Number(t.settlementAmount) || 0))
+  const minS   = settlements.length ? Math.min(...settlements) : 0
+  const maxS   = settlements.length ? Math.max(...settlements) : 1
+  const sRange = maxS - minS || 1
+  const normSize = s => 4 + ((s - minS) / sRange) * 16
+
+  let cumulative = 0
+  const lineData  = []
+  const buyPoints  = []
+  const sellPoints = []
+
+  for (const t of relevant) {
+    const settlement = Math.abs(Number(t.settlementAmount) || 0)
+    if (isBuyType(t.movementType))       cumulative += settlement
+    else if (isSellType(t.movementType)) cumulative -= settlement
+
+    const x = toSortableDate(t.date)
+    const base = {
+      x,
+      y:              cumulative,
+      dateStr:        fmtDate(t.date),
+      code:           t.code,
+      movementType:   t.movementType,
+      quantity:       Math.abs(Number(t.quantity) || 0),
+      transactionPrice: t.transactionPrice,
+      settlementAmount: t.settlementAmount,
+      size:           normSize(settlement),
+    }
+
+    lineData.push({ x, y: cumulative })
+    if (isBuyType(t.movementType)) buyPoints.push(base)
+    else                           sellPoints.push(base)
+  }
+
+  return { lineData, buyPoints, sellPoints }
+}
+
+// Custom diamond shape for Scatter — upward orientation for BUY, downward for SELL
+function DiamondShape({ cx, cy, payload, fill }) {
+  if (cx == null || cy == null) return null
+  const s = payload?.size ?? 8
+  const hw = s * 0.55 // half-width
+  const hh = s * 0.75 // half-height
+  const pts = `${cx},${cy - hh} ${cx + hw},${cy} ${cx},${cy + hh} ${cx - hw},${cy}`
+  return <polygon points={pts} fill={fill} opacity={0.85} stroke="none" />
+}
+
+function BuyDiamond(props)  { return <DiamondShape {...props} fill="#4ade80" /> }
+function SellDiamond(props) { return <DiamondShape {...props} fill="#f87171" /> }
+
+function ChartTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+
+  // Find scatter payload (has 'code'); fall back to line payload
+  const scatter = payload.find(p => p.payload?.code)
+  if (!scatter) return null
+
+  const d = scatter.payload
+  return (
+    <div style={{
+      background: '#1f2937', border: '1px solid #374151',
+      borderRadius: 8, padding: '10px 14px',
+      fontSize: 12, color: '#f3f4f6', lineHeight: 1.8,
+    }}>
+      <p style={{ fontWeight: 700, marginBottom: 4 }}>{d.dateStr}</p>
+      <p>Code: <strong>{d.code}</strong></p>
+      <p>Type: {d.movementType}</p>
+      <p>Qty: {d.quantity?.toLocaleString('en-AU')}</p>
+      <p>Price: {fmtAUD(d.transactionPrice)}</p>
+      <p>Settlement: {fmtAUD(d.settlementAmount)}</p>
+    </div>
+  )
+}
+
+function CapitalDeployedChart({ transactions }) {
+  const { lineData, buyPoints, sellPoints } = buildCapitalDeployedSeries(transactions)
+
+  if (!lineData.length) return null
+
+  const yTickFmt = v => '$' + (v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v.toFixed(0))
+
+  return (
+    <div className="rounded-2xl border border-gray-800 bg-gray-900 p-6">
+      <h3 className="mb-6 text-sm font-semibold uppercase tracking-widest text-gray-400">
+        Cumulative Capital Deployed Over Time
+      </h3>
+      <ResponsiveContainer width="100%" height={380}>
+        <ComposedChart margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <XAxis
+            dataKey="x"
+            type="number"
+            domain={['dataMin', 'dataMax']}
+            scale="time"
+            tickFormatter={v => fmtDate(new Date(v))}
+            tick={{ fill: '#6b7280', fontSize: 11 }}
+            axisLine={{ stroke: '#374151' }}
+            tickLine={false}
+            tickCount={8}
+          />
+          <YAxis
+            tickFormatter={yTickFmt}
+            tick={{ fill: '#6b7280', fontSize: 11 }}
+            axisLine={{ stroke: '#374151' }}
+            tickLine={false}
+            width={60}
+          />
+          <Tooltip content={<ChartTooltip />} />
+          <Legend
+            formatter={v => <span style={{ color: '#9ca3af', fontSize: 12 }}>{v}</span>}
+          />
+          <Line
+            data={lineData}
+            dataKey="y"
+            type="monotone"
+            stroke="#3b82f6"
+            strokeWidth={2}
+            dot={false}
+            activeDot={false}
+            name="Cumulative Capital"
+            legendType="line"
+          />
+          <Scatter
+            data={buyPoints}
+            dataKey="y"
+            shape={<BuyDiamond />}
+            name="BUY / DRP"
+            legendType="diamond"
+          />
+          <Scatter
+            data={sellPoints}
+            dataKey="y"
+            shape={<SellDiamond />}
+            name="SELL"
+            legendType="diamond"
+          />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
 
@@ -478,6 +653,7 @@ export default function App() {
         /* Dashboard — replaces upload zone once a file is loaded */
         <main className="mx-auto max-w-7xl px-6 py-8 space-y-6">
           <SummaryCards summary={parsed.summary} metrics={parsed.metrics} />
+          <CapitalDeployedChart transactions={parsed.transactions} />
         </main>
       ) : (
         /* Upload screen */
