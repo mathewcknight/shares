@@ -810,13 +810,13 @@ function PortfolioPieCharts({ holdings }) {
 // Stage 11b: Annual Performance Table
 // ---------------------------------------------------------------------------
 
-function buildAnnualRows(transactions, dividends, holdings, summary, priceData) {
+function buildAnnualRows(transactions, dividends, holdings, summary, priceData, lineData) {
   if (!priceData || !Object.keys(priceData).length) return []
 
   const sortedTx = [...transactions].sort((a, b) => toSortableDate(a.date) - toSortableDate(b.date))
   if (!sortedTx.length) return []
 
-  const firstYear  = new Date(toSortableDate(sortedTx[0].date)).getFullYear()
+  const firstYear   = new Date(toSortableDate(sortedTx[0].date)).getFullYear()
   const currentYear = new Date().getFullYear()
 
   // Build sorted ms arrays per ticker for price lookups
@@ -825,7 +825,7 @@ function buildAnnualRows(transactions, dividends, holdings, summary, priceData) 
     tickerMsSorted[ticker] = Object.keys(priceMap).map(Number).sort((a, b) => a - b)
   }
 
-  // Last price for ticker on or before ms (looks backwards only)
+  // Last price for ticker on or before ms
   const getPriceOnOrBefore = (ticker, ms) => {
     const ticks = tickerMsSorted[ticker]
     if (!ticks?.length) return null
@@ -837,7 +837,7 @@ function buildAnnualRows(transactions, dividends, holdings, summary, priceData) 
     return result
   }
 
-  // Portfolio market value: Σ qty × price for all open positions at ms
+  // Portfolio market value (holdings only — cash excluded for consistency)
   const portfolioValueAt = (qtyMap, ms) => {
     let total = 0
     for (const [ticker, qty] of Object.entries(qtyMap)) {
@@ -846,6 +846,43 @@ function buildAnnualRows(transactions, dividends, holdings, summary, priceData) 
       if (price != null) total += qty * price
     }
     return total
+  }
+
+  // Net non-DRP cash deployed between two timestamps (positive = money in)
+  const netCashBetween = (fromMs, toMs) => {
+    let net = 0
+    for (const t of sortedTx) {
+      const tMs = toSortableDate(t.date)
+      if (tMs <= fromMs || tMs > toMs) continue
+      const mt     = String(t.movementType || '').toLowerCase()
+      const isDrp  = mt.includes('drp') || mt.includes('dividend reinvestment')
+      if (isDrp) continue
+      const amount = Math.abs(Number(t.settlementAmount) || 0)
+      if (isBuyType(t.movementType))  net += amount
+      if (isSellType(t.movementType)) net -= amount
+    }
+    return net
+  }
+
+  // TWR for a year given a sorted list of month-end value points bracketing the year.
+  // points: array of { x (ms), y (portfolio value) } from lineData
+  // prevVal: portfolio value at the start of the year (end of prior year)
+  const yearTWR = (yearStartMs, yearEndMs, prevVal, yearLinePoints) => {
+    if (!yearLinePoints.length) return null
+
+    // Build sub-period chain: [prevVal, ...monthly values]
+    const chain = [{ ms: yearStartMs, val: prevVal }, ...yearLinePoints.map(p => ({ ms: p.x, val: p.y }))]
+
+    let product = 1
+    for (let i = 1; i < chain.length; i++) {
+      const startVal   = chain[i - 1].val
+      const endVal     = chain[i].val
+      const cashIn     = netCashBetween(chain[i - 1].ms, chain[i].ms)
+      const denominator = startVal + cashIn
+      if (denominator < 0.01) continue   // skip degenerate periods
+      product *= (endVal / denominator)
+    }
+    return product - 1
   }
 
   const holdingsQty  = {}  // yahooTicker → running qty
@@ -861,8 +898,6 @@ function buildAnnualRows(transactions, dividends, holdings, summary, priceData) 
     let capitalDeployed = 0
     let tradeCount      = 0
 
-    // Advance tx pointer through to end of this year, tracking holdings qty
-    // and accumulating per-year capital-deployed / trade counts
     while (txIdx < sortedTx.length) {
       const t   = sortedTx[txIdx]
       const tMs = toSortableDate(t.date)
@@ -885,12 +920,23 @@ function buildAnnualRows(transactions, dividends, holdings, summary, priceData) 
       txIdx++
     }
 
-    // Year-end portfolio value; add cash only for current year
-    let endValue = portfolioValueAt(holdingsQty, yearEndMs)
-    if (year === currentYear) endValue += Number(summary?.cashPosition) || 0
+    // Holdings-only value (no cash) for all years
+    const endValue = portfolioValueAt(holdingsQty, yearEndMs)
 
-    const annualReturnDollars = endValue - prevYearEndVal
-    const annualReturnPct     = prevYearEndVal > 0.01 ? annualReturnDollars / prevYearEndVal : null
+    // Annual Return $ = market movement only (strip out new capital)
+    const annualReturnDollars = endValue - prevYearEndVal - capitalDeployed
+
+    // Annual Return % — TWR using monthly lineData sub-periods
+    const yearLinePoints = (lineData || []).filter(p => p.x > yearStartMs && p.x <= yearEndMs)
+    let annualReturnPct
+    if (yearLinePoints.length > 0 && prevYearEndVal > 0.01) {
+      annualReturnPct = yearTWR(yearStartMs, yearEndMs, prevYearEndVal, yearLinePoints)
+    } else if (prevYearEndVal > 0.01) {
+      // Modified Dietz fallback: assume capital deployed mid-year on average
+      annualReturnPct = annualReturnDollars / (prevYearEndVal + 0.5 * capitalDeployed)
+    } else {
+      annualReturnPct = null
+    }
 
     // Dividends paid in this calendar year
     const yearDividends = dividends
@@ -898,8 +944,8 @@ function buildAnnualRows(transactions, dividends, holdings, summary, priceData) 
       .reduce((s, d) => s + (Number(d.value) || 0), 0)
 
     // VGS year-over-year return
-    const vgsEnd   = getPriceOnOrBefore('VGS.AX', yearEndMs)
-    const vgsStart = getPriceOnOrBefore('VGS.AX', prevYearEndMs)
+    const vgsEnd    = getPriceOnOrBefore('VGS.AX', yearEndMs)
+    const vgsStart  = getPriceOnOrBefore('VGS.AX', prevYearEndMs)
     const vgsReturn = vgsEnd && vgsStart && vgsStart > 0 ? (vgsEnd - vgsStart) / vgsStart : null
 
     rows.push({ year, endValue, annualReturnDollars, annualReturnPct, capitalDeployed, dividends: yearDividends, trades: tradeCount, vgsReturn })
@@ -912,27 +958,28 @@ function buildAnnualRows(transactions, dividends, holdings, summary, priceData) 
 function AnnualPerformanceTable({ transactions, dividends, holdings, summary, priceData }) {
   if (!priceData || !Object.keys(priceData).length) return null
 
-  const rows = buildAnnualRows(transactions, dividends, holdings, summary, priceData)
+  const { lineData } = buildPortfolioValueSeries(transactions, priceData, dividends)
+  const rows = buildAnnualRows(transactions, dividends, holdings, summary, priceData, lineData)
   if (!rows.length) return null
 
-  // Footer totals / averages
-  const validPct  = rows.filter(r => r.annualReturnPct !== null)
-  const vgsFirst  = rows.find(r => r.vgsReturn !== null)
-  const vgsLast   = [...rows].reverse().find(r => r.vgsReturn !== null)
-  // Compound VGS return over whole period = ∏(1 + annual) − 1
+  // Compound TWR over all years = ∏(1 + yearTWR) − 1
+  const rowsWithPct    = rows.filter(r => r.annualReturnPct !== null)
+  const compoundTWR    = rowsWithPct.length
+    ? rowsWithPct.reduce((prod, r) => prod * (1 + r.annualReturnPct), 1) - 1
+    : null
   const vgsTotalCompound = rows
     .filter(r => r.vgsReturn !== null)
     .reduce((prod, r) => prod * (1 + r.vgsReturn), 1) - 1
 
   const totals = {
-    year:                 'Total / Avg',
+    year:                'Total',
     endValue:             rows[rows.length - 1].endValue,
     annualReturnDollars:  rows.reduce((s, r) => s + r.annualReturnDollars, 0),
-    annualReturnPct:      validPct.length ? validPct.reduce((s, r) => s + r.annualReturnPct, 0) / validPct.length : null,
+    annualReturnPct:      compoundTWR,
     capitalDeployed:      rows.reduce((s, r) => s + r.capitalDeployed, 0),
     dividends:            rows.reduce((s, r) => s + r.dividends, 0),
     trades:               rows.reduce((s, r) => s + r.trades, 0),
-    vgsReturn:            vgsFirst && vgsLast ? vgsTotalCompound : null,
+    vgsReturn:            rows.some(r => r.vgsReturn !== null) ? vgsTotalCompound : null,
   }
 
   const fmtPctAnn = v => v !== null && v !== undefined ? (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + '%' : '—'
