@@ -1030,14 +1030,13 @@ function buildReturnComponentSeries(transactions, dividends, priceData) {
   // Find timestamps for the COVID window (Oct-2019 through Dec-2020) for diagnostics
   const covidWindowMs = new Set(
     sortedMonths.filter(ms => {
-      const d = new Date(ms)
-      const yr = d.getFullYear(), mo = d.getMonth()
+      const yr = new Date(ms).getUTCFullYear(), mo = new Date(ms).getUTCMonth()
       return (yr === 2019 && mo >= 9) || yr === 2020  // Oct-2019 through Dec-2020
     })
   )
   const mar20Ms = sortedMonths.find(ms => {
     const d = new Date(ms)
-    return d.getFullYear() === 2020 && d.getMonth() === 2  // getMonth() 2 = March
+    return d.getUTCFullYear() === 2020 && d.getUTCMonth() === 2  // UTCMonth 2 = March
   }) ?? null
 
   for (const ms of sortedMonths) {
@@ -1098,10 +1097,12 @@ function buildReturnComponentSeries(transactions, dividends, priceData) {
   if (covidRows.length) {
     console.group('[Stage 8] COVID-window unrealised P&L — Oct-2019 to Dec-2020')
     const total = r => r.unrealised + r.realised + r.dividends + r.drp
-    console.log('  month     unrealised    realised     div     drp     total')
+    console.log('  month    rawTimestampUTC              unrealised    realised     div     drp     total')
     for (const r of covidRows) {
+      const ts = new Date(r.x).toISOString()
       console.log(
         `  ${fmtMMMyy(r.x).padEnd(8)}` +
+        `  ${ts.padEnd(28)}` +
         `  ${String(r.unrealised.toFixed(0)).padStart(10)}` +
         `  ${String(r.realised.toFixed(0)).padStart(9)}` +
         `  ${String(r.dividends.toFixed(0)).padStart(7)}` +
