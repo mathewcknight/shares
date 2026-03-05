@@ -3,6 +3,7 @@ import {
   ComposedChart, AreaChart, Area,
   Line, Scatter, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, Legend, Brush,
+  PieChart, Pie, Cell,
 } from 'recharts'
 
 // ---------------------------------------------------------------------------
@@ -552,6 +553,123 @@ function HoldingsTable({ holdings, metrics, transactions }) {
             ))}
           </tbody>
         </table>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Stage 10: Portfolio Pie Charts
+// ---------------------------------------------------------------------------
+
+const PIE_PALETTE = [
+  '#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6',
+  '#06b6d4','#f97316','#ec4899','#84cc16','#6366f1',
+  '#14b8a6','#fb923c','#a78bfa','#34d399','#fbbf24',
+]
+
+function PortfolioPieCharts({ holdings }) {
+  const openHoldings = holdings.filter(h => Number(h.marketValue) > 0)
+  const totalValue   = openHoldings.reduce((s, h) => s + Number(h.marketValue), 0)
+
+  // Left: one slice per code
+  const holdingSlices = openHoldings.map(h => ({
+    code:  h.code,
+    value: Number(h.marketValue),
+    pct:   totalValue > 0 ? Number(h.marketValue) / totalValue : 0,
+  }))
+
+  // Right: ETF (ends .AXW) vs Shares
+  const etfValue    = openHoldings.filter(h => String(h.code).endsWith('.AXW')).reduce((s, h) => s + Number(h.marketValue), 0)
+  const sharesValue = totalValue - etfValue
+  const categorySlices = [
+    { name: 'ETF',    value: etfValue    },
+    { name: 'Shares', value: sharesValue },
+  ].filter(s => s.value > 0)
+
+  const HoldingTooltip = ({ active, payload }) => {
+    if (!active || !payload?.length) return null
+    const d = payload[0].payload
+    return (
+      <div style={{ background: '#1f2937', border: '1px solid #374151', borderRadius: 8, padding: '8px 12px', fontSize: 12 }}>
+        <div style={{ color: '#e5e7eb', fontWeight: 600, marginBottom: 4 }}>{d.code}</div>
+        <div style={{ color: '#9ca3af' }}>Market Value: <span style={{ color: '#e5e7eb' }}>{fmtAUD(d.value)}</span></div>
+        <div style={{ color: '#9ca3af' }}>Portfolio: <span style={{ color: '#e5e7eb' }}>{(d.pct * 100).toFixed(2)}%</span></div>
+      </div>
+    )
+  }
+
+  const CategoryTooltip = ({ active, payload }) => {
+    if (!active || !payload?.length) return null
+    const d   = payload[0].payload
+    const pct = totalValue > 0 ? d.value / totalValue : 0
+    return (
+      <div style={{ background: '#1f2937', border: '1px solid #374151', borderRadius: 8, padding: '8px 12px', fontSize: 12 }}>
+        <div style={{ color: '#e5e7eb', fontWeight: 600, marginBottom: 4 }}>{d.name}</div>
+        <div style={{ color: '#9ca3af' }}>Value: <span style={{ color: '#e5e7eb' }}>{fmtAUD(d.value)}</span></div>
+        <div style={{ color: '#9ca3af' }}>Portfolio: <span style={{ color: '#e5e7eb' }}>{(pct * 100).toFixed(2)}%</span></div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid grid-cols-2 gap-6">
+      {/* Left: Portfolio Breakdown by Holding */}
+      <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5">
+        <h3 className="text-sm font-semibold uppercase tracking-widest text-gray-400 mb-4">Portfolio Breakdown</h3>
+        <ResponsiveContainer width="100%" height={320}>
+          <PieChart>
+            <Pie
+              data={holdingSlices}
+              dataKey="value"
+              nameKey="code"
+              cx="50%"
+              cy="45%"
+              outerRadius={105}
+              innerRadius={52}
+              paddingAngle={2}
+            >
+              {holdingSlices.map((_, i) => (
+                <Cell key={i} fill={PIE_PALETTE[i % PIE_PALETTE.length]} stroke="transparent" />
+              ))}
+            </Pie>
+            <Tooltip content={<HoldingTooltip />} />
+            <Legend
+              iconType="circle"
+              iconSize={8}
+              formatter={v => <span style={{ color: '#9ca3af', fontSize: 11 }}>{v}</span>}
+            />
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Right: ETF vs Shares */}
+      <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5">
+        <h3 className="text-sm font-semibold uppercase tracking-widest text-gray-400 mb-4">ETF vs Shares</h3>
+        <ResponsiveContainer width="100%" height={320}>
+          <PieChart>
+            <Pie
+              data={categorySlices}
+              dataKey="value"
+              nameKey="name"
+              cx="50%"
+              cy="45%"
+              outerRadius={105}
+              innerRadius={52}
+              paddingAngle={4}
+            >
+              {categorySlices.map((_, i) => (
+                <Cell key={i} fill={['#3b82f6', '#10b981'][i % 2]} stroke="transparent" />
+              ))}
+            </Pie>
+            <Tooltip content={<CategoryTooltip />} />
+            <Legend
+              iconType="circle"
+              iconSize={8}
+              formatter={v => <span style={{ color: '#9ca3af', fontSize: 11 }}>{v}</span>}
+            />
+          </PieChart>
+        </ResponsiveContainer>
       </div>
     </div>
   )
@@ -1847,6 +1965,7 @@ export default function App() {
             metrics={parsed.metrics}
             transactions={parsed.transactions}
           />
+          <PortfolioPieCharts holdings={parsed.holdings} />
           <CapitalDeployedChart transactions={parsed.transactions} />
           <PortfolioValueChart
             transactions={parsed.transactions}
