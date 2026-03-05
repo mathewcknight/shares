@@ -846,6 +846,32 @@ function PortfolioValueTooltip({ active, payload }) {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Chart axis helpers — shared across all three charts
+// ---------------------------------------------------------------------------
+const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+const fmtMMMyy = ms => {
+  const d = new Date(ms)
+  return `${MONTH_ABBR[d.getUTCMonth()]}-${String(d.getUTCFullYear()).slice(2)}`
+}
+
+function quarterlyTicks(xMin, xMax) {
+  const ticks = []
+  const d = new Date(xMin)
+  let y = d.getUTCFullYear(), m = d.getUTCMonth()
+  // Round up to first quarter boundary (Jan=0, Apr=3, Jul=6, Oct=9)
+  const qm = Math.ceil(m / 3) * 3
+  let ty = y + (qm >= 12 ? 1 : 0), tm = qm % 12
+  let t = Date.UTC(ty, tm, 1)
+  while (t <= xMax) {
+    ticks.push(t)
+    tm += 3
+    if (tm >= 12) { tm -= 12; ty++ }
+    t = Date.UTC(ty, tm, 1)
+  }
+  return ticks
+}
+
 function CapitalDeployedChart({ transactions }) {
   const { lineData, buyPoints, drpPoints, cashDivPoints, sellPoints } =
     buildCapitalDeployedSeries(transactions)
@@ -856,6 +882,9 @@ function CapitalDeployedChart({ transactions }) {
     ? (v / 1_000_000).toFixed(1) + 'm'
     : v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v.toFixed(0))
 
+  const xMin = lineData[0].x, xMax = lineData[lineData.length - 1].x
+  const xTicks = quarterlyTicks(xMin, xMax)
+
   return (
     <div className="rounded-2xl border border-gray-800 bg-gray-900 p-6">
       <h3 className="mb-6 text-sm font-semibold uppercase tracking-widest text-gray-400">
@@ -863,23 +892,23 @@ function CapitalDeployedChart({ transactions }) {
       </h3>
       <ResponsiveContainer width="100%" height={420}>
         <ComposedChart margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <CartesianGrid strokeDasharray="3 3" stroke="#9ca3af" />
           <XAxis
             dataKey="x"
             type="number"
             domain={['dataMin', 'dataMax']}
             scale="time"
-            tickFormatter={v => fmtDate(new Date(v))}
-            tick={{ fill: '#6b7280', fontSize: 11 }}
-            axisLine={{ stroke: '#374151' }}
+            ticks={xTicks}
+            tickFormatter={fmtMMMyy}
+            tick={{ fill: '#d1d5db', fontSize: 12, fontWeight: 500 }}
+            axisLine={{ stroke: '#9ca3af' }}
             tickLine={false}
-            tickCount={8}
           />
           <YAxis
             domain={[0, 'auto']}
             tickFormatter={yTickFmt}
-            tick={{ fill: '#6b7280', fontSize: 11 }}
-            axisLine={{ stroke: '#374151' }}
+            tick={{ fill: '#d1d5db', fontSize: 12, fontWeight: 500 }}
+            axisLine={{ stroke: '#9ca3af' }}
             tickLine={false}
             width={60}
           />
@@ -902,15 +931,6 @@ function CapitalDeployedChart({ transactions }) {
           <Scatter data={sellPoints}    dataKey="y" shape={<SellDiamond />}    name="SELL"         legendType="diamond" />
           <Scatter data={cashDivPoints} dataKey="y" shape={<CashDivDiamond />} name="Cash Dividend" legendType="diamond" />
           <Scatter data={drpPoints}     dataKey="y" shape={<DRPDiamond />}     name="DRP"          legendType="diamond" />
-          <Brush
-            dataKey="x"
-            data={lineData}
-            tickFormatter={v => fmtDate(new Date(v))}
-            height={28}
-            stroke="#374151"
-            fill="#111827"
-            travellerWidth={6}
-          />
         </ComposedChart>
       </ResponsiveContainer>
     </div>
@@ -937,13 +957,36 @@ function CapitalDeployedChart({ transactions }) {
 function buildReturnComponentSeries(transactions, dividends, priceData) {
   if (!priceData || !Object.keys(priceData).length) return []
 
-  // ── 1. Union of all month timestamps ───────────────────────────────────────
-  const allMs = new Set()
+  // ── 1. Union of all month timestamps, deduplicated by calendar year+month ──
+  const monthKeyMap = new Map()
   for (const priceMap of Object.values(priceData)) {
-    for (const ms of Object.keys(priceMap)) allMs.add(Number(ms))
+    for (const ms of Object.keys(priceMap)) {
+      const msNum = Number(ms)
+      const d = new Date(msNum)
+      const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}`
+      if (!monthKeyMap.has(key) || msNum < monthKeyMap.get(key)) monthKeyMap.set(key, msNum)
+    }
   }
-  const sortedMonths = [...allMs].sort((a, b) => a - b)
+  const sortedMonths = [...monthKeyMap.values()].sort((a, b) => a - b)
   if (!sortedMonths.length) return []
+
+  // Per-ticker sorted timestamp arrays for backwards-only price lookups
+  const tickerMsSorted = {}
+  for (const [ticker, priceMap] of Object.entries(priceData)) {
+    tickerMsSorted[ticker] = Object.keys(priceMap).map(Number).sort((a, b) => a - b)
+  }
+  // Most recent price on or before ms — never forward — prevents future crash
+  // prices from inflating pre-crash portfolio values (COVID spike fix).
+  const getMostRecentPrice = (ticker, ms) => {
+    const sorted = tickerMsSorted[ticker]
+    if (!sorted?.length) return null
+    let closest = null
+    for (const v of sorted) {
+      if (v <= ms) closest = v
+      else break
+    }
+    return closest != null ? priceData[ticker][closest] : null
+  }
 
   // ── 2. Sort inputs chronologically ─────────────────────────────────────────
   const sortedTx = [...transactions].sort(
@@ -1010,7 +1053,7 @@ function buildReturnComponentSeries(transactions, dividends, priceData) {
     let unrealised = 0
     for (const [ticker, { qty, totalCost }] of Object.entries(holdings)) {
       if (qty <= 0) continue
-      const price = priceData[ticker]?.[ms]
+      const price = getMostRecentPrice(ticker, ms)
       if (price != null) unrealised += qty * price - totalCost
     }
 
@@ -1084,16 +1127,17 @@ function buildPortfolioValueSeries(transactions, priceData) {
   for (const [ticker, priceMap] of Object.entries(priceData)) {
     tickerMsSorted[ticker] = Object.keys(priceMap).map(Number).sort((a, b) => a - b)
   }
+  // Only look backwards (most recent price on or before ms) to prevent
+  // a future crash month's depressed price from inflating pre-crash values.
   const getNearestPrice = (ticker, ms) => {
     const sorted = tickerMsSorted[ticker]
     if (!sorted?.length) return null
-    let closest = sorted[0], minDiff = Math.abs(ms - closest)
+    let closest = null
     for (const v of sorted) {
-      const diff = Math.abs(ms - v)
-      if (diff < minDiff) { minDiff = diff; closest = v }
-      else break // sorted array — once diff grows we've passed the nearest
+      if (v <= ms) closest = v
+      else break
     }
-    return priceData[ticker][closest] ?? null
+    return closest != null ? priceData[ticker][closest] : null
   }
 
   // ── 2. Walk transactions (chronological) with a running holdings map ───────
@@ -1280,8 +1324,6 @@ function buildPortfolioValueSeries(transactions, priceData) {
 }
 
 function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTickers }) {
-  const [brushDomain, setBrushDomain] = React.useState(null)
-
   if (pricesLoading) {
     return (
       <div
@@ -1309,10 +1351,12 @@ function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTic
     ? (v / 1_000_000).toFixed(1) + 'm'
     : v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v.toFixed(0))
 
-  const handleBrush = ({ startIndex, endIndex }) => {
-    if (startIndex == null || endIndex == null) return
-    setBrushDomain([lineData[startIndex].x, lineData[endIndex].x])
-  }
+  const xMin = lineData[0].x, xMax = lineData[lineData.length - 1].x
+  const xTicks = quarterlyTicks(xMin, xMax)
+
+  // Fix 3 — log last 5 points to confirm non-zero values before render
+  console.log('[PortfolioValueChart] Last 5 lineData points:',
+    lineData.slice(-5).map(p => ({ date: fmtMMMyy(p.x), y: p.y, bench: p.bench })))
 
   // Filter non-VGS failed tickers for display
   const displayFailed = failedTickers.filter(t => t !== 'VGS.AX')
@@ -1331,22 +1375,22 @@ function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTic
 
       <ResponsiveContainer width="100%" height={420}>
         <ComposedChart margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <CartesianGrid strokeDasharray="3 3" stroke="#9ca3af" />
           <XAxis
             dataKey="x"
             type="number"
-            domain={brushDomain ?? ['dataMin', 'dataMax']}
+            domain={['dataMin', 'dataMax']}
             scale="time"
-            tickFormatter={v => fmtDate(new Date(v))}
-            tick={{ fill: '#6b7280', fontSize: 11 }}
-            axisLine={{ stroke: '#374151' }}
+            ticks={xTicks}
+            tickFormatter={fmtMMMyy}
+            tick={{ fill: '#d1d5db', fontSize: 12, fontWeight: 500 }}
+            axisLine={{ stroke: '#9ca3af' }}
             tickLine={false}
-            tickCount={8}
           />
           <YAxis
             tickFormatter={yTickFmt}
-            tick={{ fill: '#6b7280', fontSize: 11 }}
-            axisLine={{ stroke: '#374151' }}
+            tick={{ fill: '#d1d5db', fontSize: 12, fontWeight: 500 }}
+            axisLine={{ stroke: '#9ca3af' }}
             tickLine={false}
             width={60}
           />
@@ -1375,7 +1419,7 @@ function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTic
               strokeDasharray="5 3"
               dot={false}
               activeDot={{ r: 4, fill: '#fb923c' }}
-              name="VGS Benchmark"
+              name="Lazy VGS Benchmark"
               legendType="line"
               connectNulls
             />
@@ -1384,17 +1428,6 @@ function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTic
           <Scatter data={sellPoints}    dataKey="y" shape={<SellDiamond />}    name="SELL"          legendType="diamond" />
           <Scatter data={cashDivPoints} dataKey="y" shape={<CashDivDiamond />} name="Cash Dividend"  legendType="diamond" />
           <Scatter data={drpPoints}     dataKey="y" shape={<DRPDiamond />}     name="DRP"           legendType="diamond" />
-          <Brush
-            data={lineData}
-            dataKey="y"
-            startIndex={0}
-            endIndex={lineData.length - 1}
-            onChange={handleBrush}
-            height={28}
-            stroke="#374151"
-            fill="#111827"
-            travellerWidth={6}
-          />
         </ComposedChart>
       </ResponsiveContainer>
     </div>
@@ -1434,8 +1467,6 @@ function ReturnBreakdownTooltip({ active, payload, label }) {
 }
 
 function ReturnBreakdownChart({ returnSeries, pricesLoading }) {
-  const [brushDomain, setBrushDomain] = React.useState(null)
-
   if (pricesLoading) {
     return (
       <div
@@ -1452,17 +1483,15 @@ function ReturnBreakdownChart({ returnSeries, pricesLoading }) {
 
   if (!returnSeries?.length) return null
 
-  const handleBrush = ({ startIndex, endIndex }) => {
-    if (startIndex == null || endIndex == null) return
-    setBrushDomain([returnSeries[startIndex].x, returnSeries[endIndex].x])
-  }
-
   const yTickFmt = v => '$' + (v >= 1_000_000
     ? (v / 1_000_000).toFixed(1) + 'm'
     : v <= -1_000_000 ? '-' + (Math.abs(v) / 1_000_000).toFixed(1) + 'm'
     : v >= 1000 ? (v / 1000).toFixed(0) + 'k'
     : v <= -1000 ? '-' + (Math.abs(v) / 1000).toFixed(0) + 'k'
     : v.toFixed(0))
+
+  const xMin = returnSeries[0].x, xMax = returnSeries[returnSeries.length - 1].x
+  const xTicks = quarterlyTicks(xMin, xMax)
 
   return (
     <div className="rounded-2xl border border-gray-800 bg-gray-900 p-6 space-y-4">
@@ -1491,22 +1520,22 @@ function ReturnBreakdownChart({ returnSeries, pricesLoading }) {
               <stop offset="95%" stopColor="#2dd4bf" stopOpacity={0.05} />
             </linearGradient>
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <CartesianGrid strokeDasharray="3 3" stroke="#9ca3af" />
           <XAxis
             dataKey="x"
             type="number"
-            domain={brushDomain ?? ['dataMin', 'dataMax']}
+            domain={['dataMin', 'dataMax']}
             scale="time"
-            tickFormatter={v => fmtDate(new Date(v))}
-            tick={{ fill: '#6b7280', fontSize: 11 }}
-            axisLine={{ stroke: '#374151' }}
+            ticks={xTicks}
+            tickFormatter={fmtMMMyy}
+            tick={{ fill: '#d1d5db', fontSize: 12, fontWeight: 500 }}
+            axisLine={{ stroke: '#9ca3af' }}
             tickLine={false}
-            tickCount={8}
           />
           <YAxis
             tickFormatter={yTickFmt}
-            tick={{ fill: '#6b7280', fontSize: 11 }}
-            axisLine={{ stroke: '#374151' }}
+            tick={{ fill: '#d1d5db', fontSize: 12, fontWeight: 500 }}
+            axisLine={{ stroke: '#9ca3af' }}
             tickLine={false}
             width={60}
           />
@@ -1518,16 +1547,6 @@ function ReturnBreakdownChart({ returnSeries, pricesLoading }) {
           <Area dataKey="dividends"  type="monotone" stroke="#60a5fa" fill="url(#gradDividends)"  strokeWidth={1.5} name="Dividends"     stackId="stack" />
           <Area dataKey="realised"   type="monotone" stroke="#4ade80" fill="url(#gradRealised)"   strokeWidth={1.5} name="Realised P&L"  stackId="stack" />
           <Area dataKey="unrealised" type="monotone" stroke="#a78bfa" fill="url(#gradUnrealised)" strokeWidth={1.5} name="Unrealised P&L" stackId="stack" />
-          <Brush
-            dataKey="x"
-            startIndex={0}
-            endIndex={returnSeries.length - 1}
-            onChange={handleBrush}
-            height={28}
-            stroke="#374151"
-            fill="#111827"
-            travellerWidth={6}
-          />
         </AreaChart>
       </ResponsiveContainer>
     </div>
