@@ -1166,12 +1166,14 @@ function buildPortfolioValueSeries(transactions, priceData) {
 
     // Sum market value for this month (nearest-price lookup per ticker)
     let value = 0
+    let totalQty = 0
     for (const [ticker, qty] of Object.entries(holdings)) {
       if (qty <= 0) continue
+      totalQty += qty
       const price = getNearestPrice(ticker, ms)
       if (price != null) value += qty * price
     }
-    rawLine.push({ x: ms, y: value })
+    rawLine.push({ x: ms, y: value, totalQty })
   }
 
   // Trim leading zeros (before first buy) and trailing zeros / missing-price rows
@@ -1256,6 +1258,7 @@ function buildPortfolioValueSeries(transactions, priceData) {
       // Benchmark value = accumulated VGS units × this month's VGS price
       const monthPrice = vgsPrices[pt.x] ?? getNearestVgsPrice(pt.x)
       pt.bench = monthPrice && monthPrice > 0 ? vgsUnits * monthPrice : null
+      pt.vgsUnits = vgsUnits
     }
 
     // ── DEBUG: benchmark series first/last 10 rows ─────────────────────────
@@ -1715,13 +1718,68 @@ export default function App() {
 
   const handleFileInput = (e) => handleFile(e.target.files[0])
 
+  const exportDebugCSVs = () => {
+    const downloadCSV = (filename, content) => {
+      const blob = new Blob([content], { type: 'text/csv' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.click()
+      URL.revokeObjectURL(url)
+    }
+
+    // CSV 1 — portfolio value series
+    const { lineData } = buildPortfolioValueSeries(parsed.transactions, priceData)
+    const rows1 = ['date,portfolioValue,benchmarkValue,totalQtyHeld,vgsUnitsHeld']
+    for (const pt of lineData) {
+      rows1.push([
+        fmtMMMyy(pt.x),
+        (pt.y ?? 0).toFixed(2),
+        pt.bench != null ? pt.bench.toFixed(2) : '',
+        (pt.totalQty ?? 0).toFixed(4),
+        (pt.vgsUnits ?? 0).toFixed(4),
+      ].join(','))
+    }
+    downloadCSV('portfolio-value-debug.csv', rows1.join('\n'))
+
+    // CSV 2 — return component series (already in state)
+    const rows2 = ['date,unrealised,realised,dividends,drp,total']
+    for (const r of returnSeries) {
+      const total = (r.unrealised ?? 0) + (r.realised ?? 0) + (r.dividends ?? 0) + (r.drp ?? 0)
+      rows2.push([
+        fmtMMMyy(r.x),
+        (r.unrealised ?? 0).toFixed(2),
+        (r.realised ?? 0).toFixed(2),
+        (r.dividends ?? 0).toFixed(2),
+        (r.drp ?? 0).toFixed(2),
+        total.toFixed(2),
+      ].join(','))
+    }
+    downloadCSV('return-series-debug.csv', rows2.join('\n'))
+  }
+
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100" style={{ backgroundColor: '#0a0a0f' }}>
       {/* Header */}
       <header className="border-b border-gray-800 bg-gray-900 px-6 py-4">
-        <div className="mx-auto max-w-7xl flex items-center gap-3">
-          <div className="h-8 w-8 rounded-lg bg-blue-600 flex items-center justify-center text-sm font-bold">P</div>
-          <h1 className="text-lg font-semibold tracking-wide text-white">Portfolio Dashboard</h1>
+        <div className="mx-auto max-w-7xl flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="h-8 w-8 rounded-lg bg-blue-600 flex items-center justify-center text-sm font-bold">P</div>
+            <h1 className="text-lg font-semibold tracking-wide text-white">Portfolio Dashboard</h1>
+          </div>
+          {parsed && priceData && !pricesLoading && (
+            <button
+              onClick={exportDebugCSVs}
+              style={{
+                fontSize: 11, padding: '4px 10px', borderRadius: 6,
+                background: '#1f2937', border: '1px solid #374151',
+                color: '#9ca3af', cursor: 'pointer',
+              }}
+            >
+              Export Debug CSVs
+            </button>
+          )}
         </div>
       </header>
 
