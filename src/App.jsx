@@ -283,6 +283,82 @@ function createCostBasisTracker(getKey) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Stage 11: XIRR — time-weighted internal rate of return
+// ---------------------------------------------------------------------------
+
+/**
+ * xirr(cashflows) — Newton-Raphson XIRR solver.
+ * cashflows: [{ amount: number, date: ms }]
+ *   negative amount = cash out (buy), positive amount = cash in (sell / dividend / terminal)
+ * Returns annualised rate (e.g. 0.142 = 14.2 % p.a.) or null if it fails to converge.
+ */
+function xirr(cashflows) {
+  if (!cashflows.length) return null
+  const sorted = [...cashflows].sort((a, b) => a.date - b.date)
+  const t0 = sorted[0].date
+  const MS_PER_YEAR = 365.25 * 24 * 3600 * 1000
+  const cfs = sorted.map(cf => ({ a: cf.amount, t: (cf.date - t0) / MS_PER_YEAR }))
+
+  const npv  = r => cfs.reduce((s, { a, t }) => s + a / Math.pow(1 + r, t), 0)
+  const dnpv = r => cfs.reduce((s, { a, t }) => s - t * a / Math.pow(1 + r, t + 1), 0)
+
+  let r = 0.1
+  for (let i = 0; i < 200; i++) {
+    const f  = npv(r)
+    const df = dnpv(r)
+    if (!isFinite(f) || !isFinite(df) || Math.abs(df) < 1e-14) break
+    const next = r - f / df
+    if (next < -0.9999) { r = -0.9999; continue }
+    if (Math.abs(next - r) < 1e-9) return next
+    r = next
+  }
+  return null
+}
+
+/**
+ * Build the cashflow array from nabtrade data and call xirr().
+ *   outflows  – BUY and DRP settlements (signed negative)
+ *   inflows   – SELL settlements, cash dividends, and today's portfolio value
+ */
+function computeXirr(transactions, dividends, holdings, summary) {
+  const toMs = v => {
+    if (!v) return null
+    if (v instanceof Date) return v.getTime()
+    if (typeof v === 'string') return new Date(v).getTime()
+    // Excel serial date (shouldn't happen with cellDates:true but just in case)
+    return new Date(1899, 11, 30).getTime() + v * 86400000
+  }
+
+  const cashflows = []
+
+  for (const t of transactions) {
+    const ms  = toMs(t.date)
+    const amt = Math.abs(Number(t.settlementAmount) || 0)
+    if (!ms || !amt) continue
+    if (isBuyType(t.movementType))       cashflows.push({ amount: -amt, date: ms })
+    else if (isSellType(t.movementType)) cashflows.push({ amount:  amt, date: ms })
+  }
+
+  for (const d of dividends) {
+    const ms  = toMs(d.date)
+    const amt = Number(d.value) || 0
+    if (ms && amt > 0) cashflows.push({ amount: amt, date: ms })
+  }
+
+  // Terminal value: current holdings market value + cash position
+  const terminalValue =
+    holdings.reduce((s, h) => s + (Number(h.marketValue) || 0), 0) +
+    (Number(summary?.cashPosition) || 0)
+  if (terminalValue > 0) cashflows.push({ amount: terminalValue, date: Date.now() })
+
+  const hasOut = cashflows.some(cf => cf.amount < 0)
+  const hasIn  = cashflows.some(cf => cf.amount > 0)
+  if (!hasOut || !hasIn) return null
+
+  return xirr(cashflows)
+}
+
 /**
  * calculateMetrics({ holdings, transactions, dividends })
  *
@@ -445,6 +521,14 @@ function SummaryCards({ summary, metrics }) {
         valueColor={pnlColor(metrics.totalReturnDollars)}
         sub={fmtPct(metrics.totalReturnPct)}
         subColor={pnlColor(metrics.totalReturnPct)}
+      />
+      <SummaryCard
+        label="Annualised IRR"
+        value={metrics.xirr !== null && metrics.xirr !== undefined
+          ? (metrics.xirr >= 0 ? '+' : '') + (metrics.xirr * 100).toFixed(2) + '% p.a.'
+          : '—'}
+        valueColor={metrics.xirr !== null && metrics.xirr !== undefined ? pnlColor(metrics.xirr) : '#9ca3af'}
+        sub="XIRR (time-weighted)"
       />
     </div>
   )
@@ -1851,7 +1935,9 @@ export default function App() {
         const data = parseWorkbook(e.target.result)
         const metrics = calculateMetrics(data)
         logMetrics(metrics)
-        setParsed({ ...data, metrics })
+        const portfolioXirr = computeXirr(data.transactions, data.dividends, data.holdings, data.summary)
+        console.log('[Stage 11] XIRR:', portfolioXirr !== null ? (portfolioXirr * 100).toFixed(4) + '%' : 'n/a')
+        setParsed({ ...data, metrics: { ...metrics, xirr: portfolioXirr } })
         setPricesLoading(true)
         const { prices, failed } = await fetchHistoricalPrices(data.transactions)
         setPriceData(prices)
