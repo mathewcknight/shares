@@ -1100,7 +1100,7 @@ function buildReturnComponentSeries(transactions, dividends, priceData) {
  * lineData   – { x (ms), y (AUD portfolio value) } trimmed to first non-zero
  * *Points    – transaction markers placed at nearest prior monthly y value
  */
-function buildPortfolioValueSeries(transactions, priceData) {
+function buildPortfolioValueSeries(transactions, priceData, dividends = []) {
   const empty = { lineData: [], buyPoints: [], drpPoints: [], cashDivPoints: [], sellPoints: [] }
 
   if (!priceData || !Object.keys(priceData).length) return empty
@@ -1185,7 +1185,16 @@ function buildPortfolioValueSeries(transactions, priceData) {
 
   if (!lineData.length) return empty
 
-  // ── 3a. VGS benchmark — replay BUY transactions as hypothetical VGS purchases
+  // ── 3a. VGS benchmark — 6-month net cash deployment
+  //
+  // For each calendar half (H1: Jan–Jun, H2: Jul–Dec) we compute:
+  //   grossBuys  = Σ isBuyType(tx) settlements  +  Σ cash dividend amounts
+  //   grossSells = Σ isSellType(tx) settlements
+  //   netCash    = grossBuys − grossSells
+  //   avgVGS     = mean of monthly VGS closes falling inside the window
+  //   units Δ    = netCash / avgVGS  (negative → partial sell-down)
+  //   cumulative units clamped to 0
+  // The "trade" takes effect at the end of the period (June / December).
   const vgsPrices = priceData['VGS.AX']
   if (vgsPrices && Object.keys(vgsPrices).length) {
     const vgsMsSorted = Object.keys(vgsPrices).map(Number).sort((a, b) => a - b)
@@ -1199,81 +1208,112 @@ function buildPortfolioValueSeries(transactions, priceData) {
       return vgsPrices[closest] ?? null
     }
 
-    let vgsUnits = 0
-    let bTxIdx = 0
-    const buyTx = [...transactions]
-      .filter(t => isBuyType(t.movementType))  // BUY + DRP — all cash deployed, excludes SELL
-      .sort((a, b) => toSortableDate(a.date) - toSortableDate(b.date))
+    // Determine year range from all transaction + dividend dates
+    const allMs = [
+      ...transactions.map(t => toSortableDate(t.date)),
+      ...dividends.map(d => toSortableDate(d.date)),
+    ].filter(Boolean)
+    if (!allMs.length) return { lineData, buyPoints, drpPoints, cashDivPoints, sellPoints }
 
-    // ── DEBUG: log VGS price range to detect near-zero prices ──────────────
-    const vgsPriceValues = Object.values(vgsPrices)
-    const vgsPriceMin = Math.min(...vgsPriceValues)
-    const vgsPriceMax = Math.max(...vgsPriceValues)
-    console.group('[Benchmark DEBUG] VGS.AX price data')
-    console.log(`Price range: $${vgsPriceMin.toFixed(2)} – $${vgsPriceMax.toFixed(2)} over ${vgsPriceValues.length} months`)
-    const nearZero = vgsPriceValues.filter(p => p < 1)
-    if (nearZero.length) console.warn('⚠️  Near-zero prices found:', nearZero)
-    else console.log('✅  No near-zero prices')
-    console.groupEnd()
+    const startYear = new Date(Math.min(...allMs)).getFullYear()
+    const endDate   = new Date(Math.max(...allMs))
+    const endYear   = endDate.getFullYear()
+    const endHalf   = endDate.getMonth() < 6 ? 0 : 1  // 0 = H1, 1 = H2
 
-    // ── DEBUG: per-BUY transaction log ─────────────────────────────────────
-    console.group('[Benchmark DEBUG] BUY transactions → hypothetical VGS units')
-    console.log('BUY + DRP transactions counted (SELL excluded). Units never reduced.')
-    let runningUnits = 0
-    for (const t of buyTx) {
-      const settlement = Math.abs(Number(t.settlementAmount) || 0)
-      const txMs = toSortableDate(t.date)
-      const price = getNearestVgsPrice(txMs)
-      // Find which month key was actually used
-      let closestMs = vgsMsSorted[0], minDiff = Math.abs(txMs - closestMs)
-      for (const v of vgsMsSorted) {
-        const diff = Math.abs(txMs - v)
-        if (diff < minDiff) { minDiff = diff; closestMs = v }
+    // Build the list of 6-month periods to evaluate
+    const periods = []
+    for (let year = startYear; year <= endYear; year++) {
+      for (let half = 0; half <= 1; half++) {
+        if (year === endYear && half > endHalf) break
+        const startMonth = half === 0 ? 0 : 6   // 0=Jan, 6=Jul
+        const endMonth   = half === 0 ? 5 : 11  // 5=Jun, 11=Dec
+        // Use a month-index (year*12+month) for unambiguous period-end comparison
+        const endMonthIdx = year * 12 + endMonth
+        // Exact timestamp bounds for transaction bucketing (local time)
+        const periodStartMs = new Date(year, startMonth, 1).getTime()
+        const periodEndMs   = new Date(year, endMonth + 1, 0, 23, 59, 59, 999).getTime()
+        periods.push({ label: `H${half + 1}-${year}`, endMonthIdx, periodStartMs, periodEndMs })
       }
-      const daysDiff = Math.round(minDiff / 86400000)
-      const units = (price && price > 0 && settlement > 0) ? settlement / price : 0
-      runningUnits += units
-      const flag = units > 10000 ? '🚨 UNREALISTIC' : units > 1000 ? '⚠️ HIGH' : ''
+    }
+
+    // Compute each period's net cash and resulting unit delta
+    let cumulativeUnits = 0
+    // Store as [{endMonthIdx, cumulativeUnits}] for later chart mapping
+    const periodResults = []
+
+    console.group('[Benchmark] 6-month net cash VGS benchmark (Lazy VGS)')
+
+    for (const period of periods) {
+      // BUY side: isBuyType transactions + cash dividends
+      let grossBuys = 0
+      for (const t of transactions) {
+        const ms = toSortableDate(t.date)
+        if (ms < period.periodStartMs || ms > period.periodEndMs) continue
+        if (isBuyType(t.movementType)) grossBuys += Math.abs(Number(t.settlementAmount) || 0)
+      }
+      for (const d of dividends) {
+        const ms = toSortableDate(d.date)
+        if (ms < period.periodStartMs || ms > period.periodEndMs) continue
+        grossBuys += Math.abs(Number(d.value) || 0)
+      }
+
+      // SELL side: isSellType transactions
+      let grossSells = 0
+      for (const t of transactions) {
+        const ms = toSortableDate(t.date)
+        if (ms < period.periodStartMs || ms > period.periodEndMs) continue
+        if (isSellType(t.movementType)) grossSells += Math.abs(Number(t.settlementAmount) || 0)
+      }
+
+      const netCash = grossBuys - grossSells
+
+      // Average VGS price: mean of monthly closes whose month falls inside the window
+      const windowPrices = vgsMsSorted
+        .filter(ms => ms >= period.periodStartMs && ms <= period.periodEndMs)
+        .map(ms => vgsPrices[ms])
+        .filter(p => p != null && p > 0)
+
+      if (!windowPrices.length) {
+        console.warn(`[Benchmark] ${period.label}: no VGS price data in window — skipping period`)
+        periodResults.push({ endMonthIdx: period.endMonthIdx, cumulativeUnits })
+        continue
+      }
+
+      const avgVgsPrice = windowPrices.reduce((s, p) => s + p, 0) / windowPrices.length
+      const unitsAdded  = netCash / avgVgsPrice
+      cumulativeUnits   = Math.max(0, cumulativeUnits + unitsAdded)
+
+      periodResults.push({ endMonthIdx: period.endMonthIdx, cumulativeUnits })
+
       console.log(
-        `${fmtDate(t.date)}  ${t.code.padEnd(8)}  settlement=$${settlement.toFixed(2).padStart(10)}` +
-        `  VGS price=$${price?.toFixed(2).padStart(7) ?? 'NULL'}` +
-        `  (nearest month ${daysDiff}d away: ${new Date(closestMs).toLocaleDateString('en-AU')})` +
-        `  units=${units.toFixed(4).padStart(12)}  cumUnits=${runningUnits.toFixed(4).padStart(14)}  ${flag}`
+        `${period.label}  grossBuys=$${grossBuys.toFixed(2).padStart(10)}` +
+        `  grossSells=$${grossSells.toFixed(2).padStart(10)}` +
+        `  netCash=$${netCash.toFixed(2).padStart(11)}` +
+        `  avgVGS=$${avgVgsPrice.toFixed(2).padStart(7)}` +
+        `  unitsAdded=${unitsAdded.toFixed(4).padStart(10)}` +
+        `  cumUnits=${cumulativeUnits.toFixed(4).padStart(12)}`
       )
     }
+
     console.groupEnd()
 
+    // Assign bench values to each lineData point.
+    // A period's units take effect in the month the period ends (June or December).
+    // We compare by month-index (year*12+month) for timezone-safe period detection.
+    let pIdx = 0
+    let currentUnits = 0
     for (const pt of lineData) {
-      // Apply all BUY transactions up to this month-end
-      while (bTxIdx < buyTx.length) {
-        const t = buyTx[bTxIdx]
-        if (toSortableDate(t.date) > pt.x) break
-        const settlement = Math.abs(Number(t.settlementAmount) || 0)
-        if (settlement > 0) {
-          const price = getNearestVgsPrice(toSortableDate(t.date))
-          if (price && price > 0) vgsUnits += settlement / price
-        }
-        bTxIdx++
+      const d = new Date(pt.x)
+      const ptMonthIdx = d.getFullYear() * 12 + d.getMonth()
+      // Advance through all periods that have ended by this month
+      while (pIdx < periodResults.length && periodResults[pIdx].endMonthIdx <= ptMonthIdx) {
+        currentUnits = periodResults[pIdx].cumulativeUnits
+        pIdx++
       }
-      // Benchmark value = accumulated VGS units × this month's VGS price
       const monthPrice = vgsPrices[pt.x] ?? getNearestVgsPrice(pt.x)
-      pt.bench = monthPrice && monthPrice > 0 ? vgsUnits * monthPrice : null
-      pt.vgsUnits = vgsUnits
+      pt.bench    = (monthPrice && monthPrice > 0 && currentUnits > 0) ? currentUnits * monthPrice : null
+      pt.vgsUnits = currentUnits
     }
-
-    // ── DEBUG: benchmark series first/last 10 rows ─────────────────────────
-    console.group('[Benchmark DEBUG] Benchmark series (first & last 10 rows)')
-    console.log(`Total rows: ${lineData.length}  |  Final VGS units held: ${vgsUnits.toFixed(4)}`)
-    const fmtRow = pt =>
-      `${fmtDate(new Date(pt.x))}  portfolio=$${(pt.y ?? 0).toFixed(0).padStart(10)}` +
-      `  bench=${pt.bench != null ? '$' + pt.bench.toFixed(0).padStart(10) : '        null'}`
-    console.log('--- First 10 ---')
-    lineData.slice(0, 10).forEach(pt => console.log(fmtRow(pt)))
-    if (lineData.length > 10) {
-      console.log('--- Last 10 ---')
-      lineData.slice(-10).forEach(pt => console.log(fmtRow(pt)))
-    }
-    console.groupEnd()
   }
 
   // ── 3b. Scatter markers — placed at nearest prior monthly portfolio value ────
@@ -1326,7 +1366,7 @@ function buildPortfolioValueSeries(transactions, priceData) {
   return { lineData, buyPoints, drpPoints, cashDivPoints, sellPoints }
 }
 
-function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTickers }) {
+function PortfolioValueChart({ transactions, dividends, priceData, pricesLoading, failedTickers }) {
   if (pricesLoading) {
     return (
       <div
@@ -1344,7 +1384,7 @@ function PortfolioValueChart({ transactions, priceData, pricesLoading, failedTic
   if (!priceData || !Object.keys(priceData).length) return null
 
   const { lineData, buyPoints, drpPoints, cashDivPoints, sellPoints } =
-    buildPortfolioValueSeries(transactions, priceData)
+    buildPortfolioValueSeries(transactions, priceData, dividends)
 
   if (!lineData.length) return null
 
@@ -1730,7 +1770,7 @@ export default function App() {
     }
 
     // CSV 1 — portfolio value series
-    const { lineData } = buildPortfolioValueSeries(parsed.transactions, priceData)
+    const { lineData } = buildPortfolioValueSeries(parsed.transactions, priceData, parsed.dividends)
     const rows1 = ['date,portfolioValue,benchmarkValue,totalQtyHeld,vgsUnitsHeld']
     for (const pt of lineData) {
       rows1.push([
@@ -1799,6 +1839,7 @@ export default function App() {
           <CapitalDeployedChart transactions={parsed.transactions} />
           <PortfolioValueChart
             transactions={parsed.transactions}
+            dividends={parsed.dividends}
             priceData={priceData}
             pricesLoading={pricesLoading}
             failedTickers={failedTickers}
