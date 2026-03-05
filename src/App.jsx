@@ -568,6 +568,8 @@ const PIE_PALETTE = [
   '#14b8a6','#fb923c','#a78bfa','#34d399','#fbbf24',
 ]
 
+const RADIAN = Math.PI / 180
+
 function PortfolioPieCharts({ holdings }) {
   const openHoldings = holdings.filter(h => Number(h.marketValue) > 0)
   const totalValue   = openHoldings.reduce((s, h) => s + Number(h.marketValue), 0)
@@ -587,28 +589,33 @@ function PortfolioPieCharts({ holdings }) {
     { name: 'Shares', value: sharesValue },
   ].filter(s => s.value > 0)
 
-  const HoldingTooltip = ({ active, payload }) => {
-    if (!active || !payload?.length) return null
-    const d = payload[0].payload
+  const renderHoldingLabel = ({ cx, cy, midAngle, outerRadius, payload, value }) => {
+    if (payload.pct < 0.03) return null
+    const radius = outerRadius + 32
+    const x = cx + radius * Math.cos(-midAngle * RADIAN)
+    const y = cy + radius * Math.sin(-midAngle * RADIAN)
+    const anchor = x > cx ? 'start' : 'end'
     return (
-      <div style={{ background: '#1f2937', border: '1px solid #374151', borderRadius: 8, padding: '8px 12px', fontSize: 12 }}>
-        <div style={{ color: '#e5e7eb', fontWeight: 600, marginBottom: 4 }}>{d.code}</div>
-        <div style={{ color: '#9ca3af' }}>Market Value: <span style={{ color: '#e5e7eb' }}>{fmtAUD(d.value)}</span></div>
-        <div style={{ color: '#9ca3af' }}>Portfolio: <span style={{ color: '#e5e7eb' }}>{(d.pct * 100).toFixed(2)}%</span></div>
-      </div>
+      <text x={x} y={y} fill="#d1d5db" textAnchor={anchor} fontSize={10} dominantBaseline="central">
+        <tspan x={x} dy="-1em" fontWeight={600}>{payload.code}</tspan>
+        <tspan x={x} dy="1.3em">{fmtAUD(value)}</tspan>
+        <tspan x={x} dy="1.3em">{(payload.pct * 100).toFixed(1)}%</tspan>
+      </text>
     )
   }
 
-  const CategoryTooltip = ({ active, payload }) => {
-    if (!active || !payload?.length) return null
-    const d   = payload[0].payload
-    const pct = totalValue > 0 ? d.value / totalValue : 0
+  const renderCategoryLabel = ({ cx, cy, midAngle, outerRadius, payload, value }) => {
+    const pct = totalValue > 0 ? value / totalValue : 0
+    const radius = outerRadius + 32
+    const x = cx + radius * Math.cos(-midAngle * RADIAN)
+    const y = cy + radius * Math.sin(-midAngle * RADIAN)
+    const anchor = x > cx ? 'start' : 'end'
     return (
-      <div style={{ background: '#1f2937', border: '1px solid #374151', borderRadius: 8, padding: '8px 12px', fontSize: 12 }}>
-        <div style={{ color: '#e5e7eb', fontWeight: 600, marginBottom: 4 }}>{d.name}</div>
-        <div style={{ color: '#9ca3af' }}>Value: <span style={{ color: '#e5e7eb' }}>{fmtAUD(d.value)}</span></div>
-        <div style={{ color: '#9ca3af' }}>Portfolio: <span style={{ color: '#e5e7eb' }}>{(pct * 100).toFixed(2)}%</span></div>
-      </div>
+      <text x={x} y={y} fill="#d1d5db" textAnchor={anchor} fontSize={11} dominantBaseline="central">
+        <tspan x={x} dy="-1em" fontWeight={600}>{payload.name}</tspan>
+        <tspan x={x} dy="1.4em">{fmtAUD(value)}</tspan>
+        <tspan x={x} dy="1.4em">{(pct * 100).toFixed(1)}%</tspan>
+      </text>
     )
   }
 
@@ -617,23 +624,24 @@ function PortfolioPieCharts({ holdings }) {
       {/* Left: Portfolio Breakdown by Holding */}
       <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5">
         <h3 className="text-sm font-semibold uppercase tracking-widest text-gray-400 mb-4">Portfolio Breakdown</h3>
-        <ResponsiveContainer width="100%" height={320}>
+        <ResponsiveContainer width="100%" height={380}>
           <PieChart>
             <Pie
               data={holdingSlices}
               dataKey="value"
               nameKey="code"
               cx="50%"
-              cy="45%"
-              outerRadius={105}
-              innerRadius={52}
+              cy="50%"
+              outerRadius={95}
+              innerRadius={46}
               paddingAngle={2}
+              label={renderHoldingLabel}
+              labelLine={{ stroke: '#4b5563', strokeWidth: 1 }}
             >
               {holdingSlices.map((_, i) => (
                 <Cell key={i} fill={PIE_PALETTE[i % PIE_PALETTE.length]} stroke="transparent" />
               ))}
             </Pie>
-            <Tooltip content={<HoldingTooltip />} />
             <Legend
               iconType="circle"
               iconSize={8}
@@ -646,23 +654,24 @@ function PortfolioPieCharts({ holdings }) {
       {/* Right: ETF vs Shares */}
       <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5">
         <h3 className="text-sm font-semibold uppercase tracking-widest text-gray-400 mb-4">ETF vs Shares</h3>
-        <ResponsiveContainer width="100%" height={320}>
+        <ResponsiveContainer width="100%" height={380}>
           <PieChart>
             <Pie
               data={categorySlices}
               dataKey="value"
               nameKey="name"
               cx="50%"
-              cy="45%"
-              outerRadius={105}
-              innerRadius={52}
+              cy="50%"
+              outerRadius={95}
+              innerRadius={46}
               paddingAngle={4}
+              label={renderCategoryLabel}
+              labelLine={{ stroke: '#4b5563', strokeWidth: 1 }}
             >
               {categorySlices.map((_, i) => (
                 <Cell key={i} fill={['#3b82f6', '#10b981'][i % 2]} stroke="transparent" />
               ))}
             </Pie>
-            <Tooltip content={<CategoryTooltip />} />
             <Legend
               iconType="circle"
               iconSize={8}
@@ -1172,7 +1181,8 @@ function buildReturnComponentSeries(transactions, dividends, priceData) {
       if (price != null) unrealised += qty * price - totalCost
     }
 
-    result.push({ x: ms, unrealised, realised: tracker.realisedPnL, dividends: cumDividends, drp: cumDrp })
+    const total = unrealised + tracker.realisedPnL + cumDividends + cumDrp
+    result.push({ x: ms, unrealised, realised: tracker.realisedPnL, dividends: cumDividends, drp: cumDrp, total })
   }
 
   const isNearZero = r =>
@@ -1657,7 +1667,7 @@ function ReturnBreakdownChart({ returnSeries, pricesLoading }) {
         Returns Breakdown Over Time
       </h3>
       <ResponsiveContainer width="100%" height={420}>
-        <AreaChart data={returnSeries} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}
+        <ComposedChart data={returnSeries} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}
           stackOffset="sign"
         >
           <defs>
@@ -1705,7 +1715,8 @@ function ReturnBreakdownChart({ returnSeries, pricesLoading }) {
           <Area dataKey="dividends"  type="monotone" stroke="#60a5fa" fill="url(#gradDividends)"  strokeWidth={1.5} name="Dividends"     stackId="stack" />
           <Area dataKey="realised"   type="monotone" stroke="#4ade80" fill="url(#gradRealised)"   strokeWidth={1.5} name="Realised P&L"  stackId="stack" />
           <Area dataKey="unrealised" type="monotone" stroke="#a78bfa" fill="url(#gradUnrealised)" strokeWidth={1.5} name="Unrealised P&L" stackId="stack" />
-        </AreaChart>
+          <Line dataKey="total" type="monotone" stroke="#f9fafb" strokeWidth={2} dot={false} name="Total Return" />
+        </ComposedChart>
       </ResponsiveContainer>
     </div>
   )
