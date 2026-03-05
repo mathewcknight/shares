@@ -360,6 +360,38 @@ function computeXirr(transactions, dividends, holdings, summary) {
 }
 
 /**
+ * CAGR of VGS.AX from the date of the first transaction to the last available
+ * price point. Used as a benchmark alongside the portfolio XIRR.
+ */
+function computeVgsCagr(transactions, priceData) {
+  const vgsPrices = priceData['VGS.AX']
+  if (!vgsPrices) return null
+
+  const vgsMsSorted = Object.keys(vgsPrices).map(Number).sort((a, b) => a - b)
+  if (vgsMsSorted.length < 2) return null
+
+  const sortedTx = [...transactions].sort((a, b) => toSortableDate(a.date) - toSortableDate(b.date))
+  if (!sortedTx.length) return null
+
+  const firstTxMs = toSortableDate(sortedTx[0].date)
+
+  // First VGS price on or just after the first transaction date
+  let startMs = vgsMsSorted.find(ms => ms >= firstTxMs)
+  if (!startMs) startMs = vgsMsSorted[vgsMsSorted.length - 1] // shouldn't happen
+
+  const endMs     = vgsMsSorted[vgsMsSorted.length - 1]
+  const startPrice = vgsPrices[startMs]
+  const endPrice   = vgsPrices[endMs]
+
+  if (!startPrice || !endPrice || startPrice <= 0 || endMs <= startMs) return null
+
+  const years = (endMs - startMs) / (365.25 * 24 * 3600 * 1000)
+  if (years < 0.01) return null
+
+  return Math.pow(endPrice / startPrice, 1 / years) - 1
+}
+
+/**
  * calculateMetrics({ holdings, transactions, dividends })
  *
  * Returns:
@@ -478,13 +510,16 @@ function pnlColor(value) {
   return n >= 0 ? '#4ade80' : '#f87171'
 }
 
-function SummaryCard({ label, value, valueColor, sub, subColor }) {
+function SummaryCard({ label, value, valueColor, sub, subColor, sub2, sub2Color }) {
   return (
     <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5 flex-1 min-w-0">
       <p className="text-xs font-medium uppercase tracking-widest text-gray-500 truncate">{label}</p>
       <p className="mt-2 text-2xl font-bold truncate" style={{ color: valueColor || '#f3f4f6' }}>{value}</p>
       {sub && (
         <p className="mt-1 text-sm font-semibold" style={{ color: subColor || '#9ca3af' }}>{sub}</p>
+      )}
+      {sub2 && (
+        <p className="mt-1 text-xs" style={{ color: sub2Color || '#6b7280' }}>{sub2}</p>
       )}
     </div>
   )
@@ -529,6 +564,9 @@ function SummaryCards({ summary, metrics }) {
           : '—'}
         valueColor={metrics.xirr !== null && metrics.xirr !== undefined ? pnlColor(metrics.xirr) : '#9ca3af'}
         sub="XIRR (time-weighted)"
+        sub2={metrics.vgsCagr != null
+          ? `VGS IRR: ${(metrics.vgsCagr >= 0 ? '+' : '') + (metrics.vgsCagr * 100).toFixed(2)}% p.a.`
+          : undefined}
       />
     </div>
   )
@@ -763,6 +801,189 @@ function PortfolioPieCharts({ holdings }) {
             />
           </PieChart>
         </ResponsiveContainer>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Stage 11b: Annual Performance Table
+// ---------------------------------------------------------------------------
+
+function buildAnnualRows(transactions, dividends, holdings, summary, priceData) {
+  if (!priceData || !Object.keys(priceData).length) return []
+
+  const sortedTx = [...transactions].sort((a, b) => toSortableDate(a.date) - toSortableDate(b.date))
+  if (!sortedTx.length) return []
+
+  const firstYear  = new Date(toSortableDate(sortedTx[0].date)).getFullYear()
+  const currentYear = new Date().getFullYear()
+
+  // Build sorted ms arrays per ticker for price lookups
+  const tickerMsSorted = {}
+  for (const [ticker, priceMap] of Object.entries(priceData)) {
+    tickerMsSorted[ticker] = Object.keys(priceMap).map(Number).sort((a, b) => a - b)
+  }
+
+  // Last price for ticker on or before ms (looks backwards only)
+  const getPriceOnOrBefore = (ticker, ms) => {
+    const ticks = tickerMsSorted[ticker]
+    if (!ticks?.length) return null
+    let result = null
+    for (const t of ticks) {
+      if (t <= ms) result = priceData[ticker][t]
+      else break
+    }
+    return result
+  }
+
+  // Portfolio market value: Σ qty × price for all open positions at ms
+  const portfolioValueAt = (qtyMap, ms) => {
+    let total = 0
+    for (const [ticker, qty] of Object.entries(qtyMap)) {
+      if (qty < 0.001) continue
+      const price = getPriceOnOrBefore(ticker, ms)
+      if (price != null) total += qty * price
+    }
+    return total
+  }
+
+  const holdingsQty  = {}  // yahooTicker → running qty
+  let txIdx          = 0
+  let prevYearEndVal = 0
+  const rows         = []
+
+  for (let year = firstYear; year <= currentYear; year++) {
+    const yearStartMs   = Date.UTC(year,      0,  1,  0,  0,  0,   0)
+    const yearEndMs     = Date.UTC(year,     11, 31, 23, 59, 59, 999)
+    const prevYearEndMs = Date.UTC(year - 1, 11, 31, 23, 59, 59, 999)
+
+    let capitalDeployed = 0
+    let tradeCount      = 0
+
+    // Advance tx pointer through to end of this year, tracking holdings qty
+    // and accumulating per-year capital-deployed / trade counts
+    while (txIdx < sortedTx.length) {
+      const t   = sortedTx[txIdx]
+      const tMs = toSortableDate(t.date)
+      if (tMs > yearEndMs) break
+
+      const ticker     = nabtradeTicker(t.code)
+      const settlement = Math.abs(Number(t.settlementAmount) || 0)
+      const qty        = Math.abs(Number(t.quantity)         || 0)
+      const mt         = String(t.movementType || '').toLowerCase()
+      const isDrp      = mt.includes('drp') || mt.includes('dividend reinvestment')
+      const inThisYear = tMs >= yearStartMs
+
+      if (isBuyType(t.movementType)) {
+        if (ticker) holdingsQty[ticker] = (holdingsQty[ticker] || 0) + qty
+        if (!isDrp && inThisYear) { capitalDeployed += settlement; tradeCount++ }
+      } else if (isSellType(t.movementType)) {
+        if (ticker) holdingsQty[ticker] = Math.max(0, (holdingsQty[ticker] || 0) - qty)
+        if (inThisYear) { capitalDeployed -= settlement; tradeCount++ }
+      }
+      txIdx++
+    }
+
+    // Year-end portfolio value; add cash only for current year
+    let endValue = portfolioValueAt(holdingsQty, yearEndMs)
+    if (year === currentYear) endValue += Number(summary?.cashPosition) || 0
+
+    const annualReturnDollars = endValue - prevYearEndVal
+    const annualReturnPct     = prevYearEndVal > 0.01 ? annualReturnDollars / prevYearEndVal : null
+
+    // Dividends paid in this calendar year
+    const yearDividends = dividends
+      .filter(d => { const ms = toSortableDate(d.date); return ms >= yearStartMs && ms <= yearEndMs })
+      .reduce((s, d) => s + (Number(d.value) || 0), 0)
+
+    // VGS year-over-year return
+    const vgsEnd   = getPriceOnOrBefore('VGS.AX', yearEndMs)
+    const vgsStart = getPriceOnOrBefore('VGS.AX', prevYearEndMs)
+    const vgsReturn = vgsEnd && vgsStart && vgsStart > 0 ? (vgsEnd - vgsStart) / vgsStart : null
+
+    rows.push({ year, endValue, annualReturnDollars, annualReturnPct, capitalDeployed, dividends: yearDividends, trades: tradeCount, vgsReturn })
+    prevYearEndVal = endValue
+  }
+
+  return rows
+}
+
+function AnnualPerformanceTable({ transactions, dividends, holdings, summary, priceData }) {
+  if (!priceData || !Object.keys(priceData).length) return null
+
+  const rows = buildAnnualRows(transactions, dividends, holdings, summary, priceData)
+  if (!rows.length) return null
+
+  // Footer totals / averages
+  const validPct  = rows.filter(r => r.annualReturnPct !== null)
+  const vgsFirst  = rows.find(r => r.vgsReturn !== null)
+  const vgsLast   = [...rows].reverse().find(r => r.vgsReturn !== null)
+  // Compound VGS return over whole period = ∏(1 + annual) − 1
+  const vgsTotalCompound = rows
+    .filter(r => r.vgsReturn !== null)
+    .reduce((prod, r) => prod * (1 + r.vgsReturn), 1) - 1
+
+  const totals = {
+    year:                 'Total / Avg',
+    endValue:             rows[rows.length - 1].endValue,
+    annualReturnDollars:  rows.reduce((s, r) => s + r.annualReturnDollars, 0),
+    annualReturnPct:      validPct.length ? validPct.reduce((s, r) => s + r.annualReturnPct, 0) / validPct.length : null,
+    capitalDeployed:      rows.reduce((s, r) => s + r.capitalDeployed, 0),
+    dividends:            rows.reduce((s, r) => s + r.dividends, 0),
+    trades:               rows.reduce((s, r) => s + r.trades, 0),
+    vgsReturn:            vgsFirst && vgsLast ? vgsTotalCompound : null,
+  }
+
+  const fmtPctAnn = v => v !== null && v !== undefined ? (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + '%' : '—'
+  const rowBgAnn  = pct => pct > 0 ? 'rgba(74,222,128,0.06)' : pct < 0 ? 'rgba(248,113,113,0.06)' : 'transparent'
+
+  const Th = ({ children, right }) => (
+    <th className={`py-2 pr-3 text-xs font-medium uppercase tracking-wider text-gray-500 ${right ? 'text-right' : 'text-left'}`}>{children}</th>
+  )
+
+  const DataRow = ({ r, isFooter }) => (
+    <tr
+      style={{
+        backgroundColor: isFooter ? 'rgba(55,65,81,0.4)' : rowBgAnn(r.annualReturnPct),
+        borderTop: isFooter ? '1px solid #374151' : undefined,
+      }}
+    >
+      <td className={`py-1.5 pr-3 tabular-nums ${isFooter ? 'font-bold text-gray-200' : 'font-semibold text-gray-300'}`}>{r.year}</td>
+      <td className="py-1.5 pr-3 text-right tabular-nums text-gray-300">{fmtAUD(r.endValue)}</td>
+      <td className="py-1.5 pr-3 text-right tabular-nums" style={{ color: r.annualReturnDollars >= 0 ? '#4ade80' : '#f87171' }}>{fmtAUD(r.annualReturnDollars)}</td>
+      <td className="py-1.5 pr-3 text-right tabular-nums" style={{ color: (r.annualReturnPct ?? 0) >= 0 ? '#4ade80' : '#f87171' }}>{fmtPctAnn(r.annualReturnPct)}</td>
+      <td className="py-1.5 pr-3 text-right tabular-nums text-gray-300">{fmtAUD(r.capitalDeployed)}</td>
+      <td className="py-1.5 pr-3 text-right tabular-nums text-gray-300">{fmtAUD(r.dividends)}</td>
+      <td className="py-1.5 pr-3 text-right tabular-nums text-gray-400">{r.trades}</td>
+      <td className="py-1.5 text-right tabular-nums" style={{ color: (r.vgsReturn ?? 0) >= 0 ? '#fb923c' : '#f87171' }}>{fmtPctAnn(r.vgsReturn)}</td>
+    </tr>
+  )
+
+  return (
+    <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5 flex flex-col gap-3">
+      <h3 className="text-sm font-semibold uppercase tracking-widest text-gray-400">Annual Performance</h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm border-collapse">
+          <thead className="sticky top-0 bg-gray-900">
+            <tr>
+              <Th>Year</Th>
+              <Th right>Portfolio Value $</Th>
+              <Th right>Annual Return $</Th>
+              <Th right>Annual Return %</Th>
+              <Th right>Capital Deployed $</Th>
+              <Th right>Dividends $</Th>
+              <Th right>Trades</Th>
+              <Th right>VGS Return %</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => <DataRow key={r.year} r={r} />)}
+          </tbody>
+          <tfoot>
+            <DataRow r={totals} isFooter />
+          </tfoot>
+        </table>
       </div>
     </div>
   )
@@ -1942,6 +2163,9 @@ export default function App() {
         const { prices, failed } = await fetchHistoricalPrices(data.transactions)
         setPriceData(prices)
         setFailedTickers(failed)
+        const vgsCagr = computeVgsCagr(data.transactions, prices)
+        console.log('[Stage 11] VGS CAGR:', vgsCagr !== null ? (vgsCagr * 100).toFixed(4) + '%' : 'n/a')
+        setParsed(prev => ({ ...prev, metrics: { ...prev.metrics, vgsCagr } }))
         const returnSeriesComputed = buildReturnComponentSeries(data.transactions, data.dividends, prices)
         const rsFmt = r =>
           `  ${fmtMMMyy(r.x).padEnd(8)}` +
@@ -2063,6 +2287,15 @@ export default function App() {
             transactions={parsed.transactions}
           />
           <PortfolioPieCharts holdings={parsed.holdings} />
+          {priceData && (
+            <AnnualPerformanceTable
+              transactions={parsed.transactions}
+              dividends={parsed.dividends}
+              holdings={parsed.holdings}
+              summary={parsed.summary}
+              priceData={priceData}
+            />
+          )}
           <CapitalDeployedChart transactions={parsed.transactions} />
           <PortfolioValueChart
             transactions={parsed.transactions}
