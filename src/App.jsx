@@ -1027,18 +1027,6 @@ function buildReturnComponentSeries(transactions, dividends, priceData) {
   let divIdx = 0
   const result = []
 
-  // Find timestamps for the COVID window (Oct-2019 through Dec-2020) for diagnostics
-  const covidWindowMs = new Set(
-    sortedMonths.filter(ms => {
-      const yr = new Date(ms).getUTCFullYear(), mo = new Date(ms).getUTCMonth()
-      return (yr === 2019 && mo >= 9) || yr === 2020  // Oct-2019 through Dec-2020
-    })
-  )
-  const mar20Ms = sortedMonths.find(ms => {
-    const d = new Date(ms)
-    return d.getUTCFullYear() === 2020 && d.getUTCMonth() === 2  // UTCMonth 2 = March
-  }) ?? null
-
   for (const ms of sortedMonths) {
     // Advance transaction pointer: apply all tx with date ≤ ms
     while (txIdx < sortedTx.length) {
@@ -1060,57 +1048,13 @@ function buildReturnComponentSeries(transactions, dividends, priceData) {
 
     // Unrealised: Σ (qty × price − costBasis) for tickers with price data
     let unrealised = 0
-    const isMar20  = ms === mar20Ms
-    if (isMar20) console.group('[Stage 8] Mar-20 unrealised P&L breakdown — qty × price − costBasis per ticker')
-
     for (const [ticker, { qty, totalCost }] of Object.entries(tracker.positions)) {
       if (qty <= 0) continue
       const price = getMostRecentPrice(ticker, ms)
-      if (price != null) {
-        const contrib = qty * price - totalCost
-        unrealised += contrib
-        if (isMar20) {
-          console.log(
-            `  ${ticker.padEnd(10)}` +
-            `  qty=${qty.toFixed(4).padStart(12)}` +
-            `  price=$${price.toFixed(4).padStart(10)}` +
-            `  costBasis=$${totalCost.toFixed(2).padStart(12)}` +
-            `  mktVal=$${(qty * price).toFixed(2).padStart(12)}` +
-            `  contrib=${contrib >= 0 ? '+' : ''}$${contrib.toFixed(2).padStart(10)}`
-          )
-        }
-      } else if (isMar20) {
-        console.log(`  ${ticker.padEnd(10)}  qty=${qty.toFixed(4).padStart(12)}  NO PRICE DATA — excluded from unrealised`)
-      }
-    }
-
-    if (isMar20) {
-      console.log(`  ── TOTAL unrealised Mar-20: ${unrealised >= 0 ? '+' : ''}$${unrealised.toFixed(2)}`)
-      console.groupEnd()
+      if (price != null) unrealised += qty * price - totalCost
     }
 
     result.push({ x: ms, unrealised, realised: tracker.realisedPnL, dividends: cumDividends, drp: cumDrp })
-  }
-
-  // ── COVID-window diagnostic: log every month Oct-2019 → Dec-2020 ───────────
-  const covidRows = result.filter(r => covidWindowMs.has(r.x))
-  if (covidRows.length) {
-    console.group('[Stage 8] COVID-window unrealised P&L — Oct-2019 to Dec-2020')
-    const total = r => r.unrealised + r.realised + r.dividends + r.drp
-    console.log('  month    rawTimestampUTC              unrealised    realised     div     drp     total')
-    for (const r of covidRows) {
-      const ts = new Date(r.x).toISOString()
-      console.log(
-        `  ${fmtMMMyy(r.x).padEnd(8)}` +
-        `  ${ts.padEnd(28)}` +
-        `  ${String(r.unrealised.toFixed(0)).padStart(10)}` +
-        `  ${String(r.realised.toFixed(0)).padStart(9)}` +
-        `  ${String(r.dividends.toFixed(0)).padStart(7)}` +
-        `  ${String(r.drp.toFixed(0)).padStart(6)}` +
-        `  ${String(total(r).toFixed(0)).padStart(8)}`
-      )
-    }
-    console.groupEnd()
   }
 
   const isNearZero = r =>
