@@ -606,9 +606,15 @@ function HoldingsTable({ holdings, metrics, transactions }) {
     const rawDesc   = h?.description ?? txDescMap[code] ?? code
     const description = String(rawDesc).split(/\s+/).slice(0, 4).join(' ')
 
-    const capitalInvested = r?.totalInvested ?? 0
+    // Open: capitalInvested = remaining cost basis (avgCost × currentQty) so that
+    // P&L = currentValue − capitalInvested exactly. Using totalInvested would
+    // include cost of units already sold and break the reconciliation.
+    // Closed: capitalInvested = total proceeds received (for return% context).
+    const capitalInvested = isOpen
+      ? (costBasisByTicker[code]?.totalCost ?? 0)
+      : (r?.totalProceeds ?? 0)
     const currentValue    = isOpen ? (Number(h?.marketValue) || 0) : (r?.totalProceeds ?? 0)
-    const pnl             = isOpen ? (Number(h?.gainLoss)    || 0) : (r?.pnl ?? 0)
+    const pnl             = isOpen ? currentValue - capitalInvested : (r?.pnl ?? 0)
     const returnPct       = capitalInvested > 0 ? pnl / capitalInvested : null
     const quantity        = isOpen ? (Number(h?.quantity)    || 0) : 0
 
