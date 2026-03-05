@@ -1027,7 +1027,14 @@ function buildReturnComponentSeries(transactions, dividends, priceData) {
   let divIdx = 0
   const result = []
 
-  // Find the March 2020 month timestamp for the diagnostic log
+  // Find timestamps for the COVID window (Oct-2019 through Dec-2020) for diagnostics
+  const covidWindowMs = new Set(
+    sortedMonths.filter(ms => {
+      const d = new Date(ms)
+      const yr = d.getFullYear(), mo = d.getMonth()
+      return (yr === 2019 && mo >= 9) || yr === 2020  // Oct-2019 through Dec-2020
+    })
+  )
   const mar20Ms = sortedMonths.find(ms => {
     const d = new Date(ms)
     return d.getFullYear() === 2020 && d.getMonth() === 2  // getMonth() 2 = March
@@ -1084,6 +1091,25 @@ function buildReturnComponentSeries(transactions, dividends, priceData) {
     }
 
     result.push({ x: ms, unrealised, realised: tracker.realisedPnL, dividends: cumDividends, drp: cumDrp })
+  }
+
+  // ── COVID-window diagnostic: log every month Oct-2019 → Dec-2020 ───────────
+  const covidRows = result.filter(r => covidWindowMs.has(r.x))
+  if (covidRows.length) {
+    console.group('[Stage 8] COVID-window unrealised P&L — Oct-2019 to Dec-2020')
+    const total = r => r.unrealised + r.realised + r.dividends + r.drp
+    console.log('  month     unrealised    realised     div     drp     total')
+    for (const r of covidRows) {
+      console.log(
+        `  ${fmtMMMyy(r.x).padEnd(8)}` +
+        `  ${String(r.unrealised.toFixed(0)).padStart(10)}` +
+        `  ${String(r.realised.toFixed(0)).padStart(9)}` +
+        `  ${String(r.dividends.toFixed(0)).padStart(7)}` +
+        `  ${String(r.drp.toFixed(0)).padStart(6)}` +
+        `  ${String(total(r).toFixed(0)).padStart(8)}`
+      )
+    }
+    console.groupEnd()
   }
 
   const isNearZero = r =>
@@ -1756,7 +1782,21 @@ export default function App() {
         const { prices, failed } = await fetchHistoricalPrices(data.transactions)
         setPriceData(prices)
         setFailedTickers(failed)
-        setReturnSeries(buildReturnComponentSeries(data.transactions, data.dividends, prices))
+        const returnSeriesComputed = buildReturnComponentSeries(data.transactions, data.dividends, prices)
+        const rsFmt = r =>
+          `  ${fmtMMMyy(r.x).padEnd(8)}` +
+          `  unreal=${String(r.unrealised.toFixed(0)).padStart(9)}` +
+          `  real=${String(r.realised.toFixed(0)).padStart(9)}` +
+          `  div=${String(r.dividends.toFixed(0)).padStart(7)}` +
+          `  drp=${String(r.drp.toFixed(0)).padStart(6)}`
+        console.group('[App] returnSeries passed to ReturnBreakdownChart')
+        console.log(`Total rows: ${returnSeriesComputed.length}`)
+        console.log('── First 5 ──')
+        returnSeriesComputed.slice(0, 5).forEach(r => console.log(rsFmt(r)))
+        console.log('── Last 5 ──')
+        returnSeriesComputed.slice(-5).forEach(r => console.log(rsFmt(r)))
+        console.groupEnd()
+        setReturnSeries(returnSeriesComputed)
       } catch (err) {
         console.error('Parse error:', err)
         setParseError(err.message)
