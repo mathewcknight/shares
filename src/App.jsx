@@ -221,6 +221,68 @@ function toSortableDate(value) {
 }
 
 /**
+ * Creates a running-average cost-basis tracker for a portfolio.
+ *
+ * Calling apply(t) on each transaction (in chronological order) maintains:
+ *   positions[key]    → { qty, totalCost }    current holdings
+ *   realisedByKey[key]→ { pnl, totalInvested, totalProceeds }
+ *   realisedPnL       → cumulative realised gain/loss
+ *
+ * Rules (average-cost method, DRP treated as BUY lot):
+ *   BUY / DRP → qty += tradeQty,  totalCost += settlement
+ *   SELL      → realise settlement − avgCost × sellQty;
+ *               reduce totalCost to avgCost × remainingQty
+ *
+ * @param {Function} getKey – maps a transaction to a position key
+ *                            e.g.  t => t.code          (calculateMetrics)
+ *                            or    t => nabtradeTicker(t.code)  (buildReturnComponentSeries)
+ */
+function createCostBasisTracker(getKey) {
+  const positions     = {}  // key → { qty, totalCost }
+  const realisedByKey = {}  // key → { pnl, totalInvested, totalProceeds }
+  let _realisedPnL    = 0
+
+  function apply(t) {
+    const key        = getKey(t)
+    if (key == null) return
+    const tradeQty   = Math.abs(Number(t.quantity)         || 0)
+    const settlement = Math.abs(Number(t.settlementAmount) || 0)
+
+    if (!positions[key])     positions[key]     = { qty: 0, totalCost: 0 }
+    if (!realisedByKey[key]) realisedByKey[key] = { pnl: 0, totalInvested: 0, totalProceeds: 0 }
+    const pos = positions[key]
+    const rec = realisedByKey[key]
+
+    if (isBuyType(t.movementType)) {
+      pos.qty           += tradeQty
+      pos.totalCost     += settlement
+      rec.totalInvested += settlement
+
+    } else if (isSellType(t.movementType)) {
+      if (pos.qty > 0) {
+        const avgCost      = pos.totalCost / pos.qty
+        const tradePnL     = settlement - avgCost * tradeQty
+        _realisedPnL      += tradePnL
+        rec.pnl           += tradePnL
+        rec.totalProceeds += settlement
+        const remainingQty = Math.max(0, pos.qty - tradeQty)
+        pos.qty            = remainingQty
+        pos.totalCost      = avgCost * remainingQty   // proportional reduction
+      } else {
+        console.warn(`[costBasis] SELL for "${key}" with no tracked position — skipped`)
+      }
+    }
+  }
+
+  return {
+    apply,
+    positions,
+    realisedByKey,
+    get realisedPnL() { return _realisedPnL },
+  }
+}
+
+/**
  * calculateMetrics({ holdings, transactions, dividends })
  *
  * Returns:
@@ -262,57 +324,14 @@ function calculateMetrics({ holdings, transactions, dividends }) {
   )
 
   // ------------------------------------------------------------------
-  // Realised P&L — running-average cost basis per ticker
-  //
-  // State per ticker: { qty, totalCost }
-  //   qty       = shares currently held (decreases on SELL)
-  //   totalCost = total cost basis of those shares (avgCost = totalCost/qty)
-  //
-  // On BUY/DRP:
-  //   qty       += trade qty
-  //   totalCost += abs(settlementAmount)   ← includes brokerage
-  //
-  // On SELL:
-  //   avgCost         = totalCost / qty
-  //   realisedPnL    += abs(sellSettlement) - avgCost * sellQty
-  //   qty            -= sellQty
-  //   totalCost       = avgCost * remainingQty   ← avg cost unchanged
+  // Realised P&L — via shared createCostBasisTracker (average-cost method)
+  //   key = t.code (raw nabtrade code, matches HoldingsTable lookup)
   // ------------------------------------------------------------------
-  const costBasisByTicker  = {}
-  const realisedByTicker   = {} // { [code]: { pnl, totalInvested } }
-  let realisedPnL = 0
-
-  for (const t of sorted) {
-    const code       = t.code
-    const tradeQty   = Math.abs(Number(t.quantity)         || 0)
-    const settlement = Math.abs(Number(t.settlementAmount) || 0)
-
-    if (!costBasisByTicker[code]) costBasisByTicker[code] = { qty: 0, totalCost: 0 }
-    if (!realisedByTicker[code])  realisedByTicker[code]  = { pnl: 0, totalInvested: 0, totalProceeds: 0 }
-    const pos = costBasisByTicker[code]
-    const rec = realisedByTicker[code]
-
-    if (isBuyType(t.movementType)) {
-      pos.qty            += tradeQty
-      pos.totalCost      += settlement
-      rec.totalInvested  += settlement
-
-    } else if (isSellType(t.movementType)) {
-      if (pos.qty > 0) {
-        const avgCost      = pos.totalCost / pos.qty
-        const tradePnL     = settlement - avgCost * tradeQty
-        realisedPnL       += tradePnL
-        rec.pnl            += tradePnL
-        rec.totalProceeds  += settlement
-        const remainingQty = Math.max(0, pos.qty - tradeQty)
-        pos.qty            = remainingQty
-        pos.totalCost      = avgCost * remainingQty
-      } else {
-        // Selling a position with no tracked cost basis (data before window)
-        console.warn(`[Stage 4] SELL for ${code} but no cost basis tracked — skipping realised P&L for this trade`)
-      }
-    }
-  }
+  const tracker = createCostBasisTracker(t => t.code)
+  for (const t of sorted) tracker.apply(t)
+  const costBasisByTicker = tracker.positions
+  const realisedByTicker  = tracker.realisedByKey
+  const realisedPnL       = tracker.realisedPnL
 
   // ------------------------------------------------------------------
   // Total Dividends
@@ -997,47 +1016,31 @@ function buildReturnComponentSeries(transactions, dividends, priceData) {
   )
 
   // ── 3. Walk months with running state ──────────────────────────────────────
-  const holdings   = {} // yahooTicker → { qty, totalCost }
-  let cumRealised  = 0
+  // createCostBasisTracker uses identical average-cost logic to calculateMetrics
+  // (isBuyType covers BUY + DRP; isSellType covers SELL).
+  // Key = Yahoo ticker format so positions align with priceData lookups.
+  // cumDrp is tracked separately alongside the tracker for chart display.
+  const tracker    = createCostBasisTracker(t => nabtradeTicker(t.code))
   let cumDrp       = 0
   let cumDividends = 0
   let txIdx  = 0
   let divIdx = 0
   const result = []
 
+  // Find the March 2020 month timestamp for the diagnostic log
+  const mar20Ms = sortedMonths.find(ms => {
+    const d = new Date(ms)
+    return d.getFullYear() === 2020 && d.getMonth() === 2  // getMonth() 2 = March
+  }) ?? null
+
   for (const ms of sortedMonths) {
     // Advance transaction pointer: apply all tx with date ≤ ms
     while (txIdx < sortedTx.length) {
       const t = sortedTx[txIdx]
       if (toSortableDate(t.date) > ms) break
-
-      const ticker     = nabtradeTicker(t.code)
-      const tradeQty   = Math.abs(Number(t.quantity)         || 0)
-      const settlement = Math.abs(Number(t.settlementAmount) || 0)
-
-      if (ticker) {
-        if (!holdings[ticker]) holdings[ticker] = { qty: 0, totalCost: 0 }
-        const pos = holdings[ticker]
-
-        if (isChartBuyOnly(t.movementType)) {
-          pos.qty       += tradeQty
-          pos.totalCost += settlement
-
-        } else if (isChartDRP(t.movementType)) {
-          pos.qty       += tradeQty
-          pos.totalCost += settlement
-          cumDrp        += settlement
-
-        } else if (isChartSell(t.movementType)) {
-          if (pos.qty > 0) {
-            const avgCost      = pos.totalCost / pos.qty
-            cumRealised       += settlement - avgCost * tradeQty
-            const remainingQty = Math.max(0, pos.qty - tradeQty)
-            pos.qty            = remainingQty
-            pos.totalCost      = avgCost * remainingQty
-          }
-        }
-      }
+      // Track DRP cash separately for the chart series; tracker handles cost basis
+      if (isChartDRP(t.movementType)) cumDrp += Math.abs(Number(t.settlementAmount) || 0)
+      tracker.apply(t)
       txIdx++
     }
 
@@ -1051,13 +1054,36 @@ function buildReturnComponentSeries(transactions, dividends, priceData) {
 
     // Unrealised: Σ (qty × price − costBasis) for tickers with price data
     let unrealised = 0
-    for (const [ticker, { qty, totalCost }] of Object.entries(holdings)) {
+    const isMar20  = ms === mar20Ms
+    if (isMar20) console.group('[Stage 8] Mar-20 unrealised P&L breakdown — qty × price − costBasis per ticker')
+
+    for (const [ticker, { qty, totalCost }] of Object.entries(tracker.positions)) {
       if (qty <= 0) continue
       const price = getMostRecentPrice(ticker, ms)
-      if (price != null) unrealised += qty * price - totalCost
+      if (price != null) {
+        const contrib = qty * price - totalCost
+        unrealised += contrib
+        if (isMar20) {
+          console.log(
+            `  ${ticker.padEnd(10)}` +
+            `  qty=${qty.toFixed(4).padStart(12)}` +
+            `  price=$${price.toFixed(4).padStart(10)}` +
+            `  costBasis=$${totalCost.toFixed(2).padStart(12)}` +
+            `  mktVal=$${(qty * price).toFixed(2).padStart(12)}` +
+            `  contrib=${contrib >= 0 ? '+' : ''}$${contrib.toFixed(2).padStart(10)}`
+          )
+        }
+      } else if (isMar20) {
+        console.log(`  ${ticker.padEnd(10)}  qty=${qty.toFixed(4).padStart(12)}  NO PRICE DATA — excluded from unrealised`)
+      }
     }
 
-    result.push({ x: ms, unrealised, realised: cumRealised, dividends: cumDividends, drp: cumDrp })
+    if (isMar20) {
+      console.log(`  ── TOTAL unrealised Mar-20: ${unrealised >= 0 ? '+' : ''}$${unrealised.toFixed(2)}`)
+      console.groupEnd()
+    }
+
+    result.push({ x: ms, unrealised, realised: tracker.realisedPnL, dividends: cumDividends, drp: cumDrp })
   }
 
   const isNearZero = r =>
