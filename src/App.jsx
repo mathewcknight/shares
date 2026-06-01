@@ -1,4 +1,5 @@
 import React, { useState, useCallback } from 'react'
+import ACHWorkbench from './ACHWorkbench'
 import {
   ComposedChart, AreaChart, Area,
   Line, Scatter, XAxis, YAxis, CartesianGrid,
@@ -2186,6 +2187,7 @@ async function fetchHistoricalPrices(transactions) {
 // ---------------------------------------------------------------------------
 
 export default function App() {
+  const [activeTab, setActiveTab]       = useState('portfolio')
   const [fileName, setFileName]         = useState(null)
   const [isDragging, setIsDragging]     = useState(false)
   const [parsed, setParsed]             = useState(null)
@@ -2311,7 +2313,28 @@ export default function App() {
             <div className="h-8 w-8 rounded-lg bg-blue-600 flex items-center justify-center text-sm font-bold">P</div>
             <h1 className="text-lg font-semibold tracking-wide text-white">Portfolio Dashboard</h1>
           </div>
-          {parsed && priceData && !pricesLoading && (
+          {/* Tab switcher */}
+          <nav className="flex gap-1">
+            {[
+              { id: 'portfolio', label: 'Portfolio' },
+              { id: 'analysis',  label: 'ACH Analysis' },
+            ].map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                style={{
+                  fontSize: 13, padding: '5px 14px', borderRadius: 6, fontWeight: 500,
+                  background: activeTab === tab.id ? '#3b82f6' : 'transparent',
+                  color:      activeTab === tab.id ? '#fff'    : '#9ca3af',
+                  border:     activeTab === tab.id ? '1px solid #3b82f6' : '1px solid transparent',
+                  cursor: 'pointer', transition: 'all 0.15s',
+                }}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
+          {parsed && priceData && !pricesLoading && activeTab === 'portfolio' && (
             <button
               onClick={exportDebugCSVs}
               style={{
@@ -2323,10 +2346,13 @@ export default function App() {
               Export Debug CSVs
             </button>
           )}
+          {activeTab !== 'portfolio' && <div style={{ width: 120 }} />}
         </div>
       </header>
 
-      {parsed ? (
+      {activeTab === 'analysis' ? (
+        <ACHWorkbench />
+      ) : parsed ? (
         /* Dashboard — replaces upload zone once a file is loaded */
         <main className="mx-auto max-w-7xl px-6 py-8 space-y-6">
           <SummaryCards summary={parsed.summary} metrics={parsed.metrics} />
@@ -2428,3 +2454,4 @@ export default function App() {
     </div>
   )
 }
+
