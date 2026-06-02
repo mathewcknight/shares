@@ -41,16 +41,47 @@ function extractItems(raw) {
   if (!raw) return [];
   const out = [];
   let section = "";
-  raw.split(/\r?\n/).forEach((line) => {
+  const lines = raw.split(/\r?\n/);
+
+  // Pre-identify table header rows: line i is a header if line i+1 is a separator
+  const headerLines = new Set();
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (/^\s*\|/.test(lines[i])) {
+      const next = lines[i + 1] || "";
+      const isSep = /^\s*\|/.test(next) &&
+        next.split("|").slice(1, -1).every(c => /^[\s:|-]+$/.test(c));
+      if (isSep) headerLines.add(i);
+    }
+  }
+
+  lines.forEach((line, idx) => {
     const h = line.match(/^\s{0,3}#{1,6}\s+(.+?)\s*$/);
     const boldHead = line.match(/^\s*\*\*(.+?)\*\*:?\s*$/);
     if (h) { section = stripMd(h[1]); return; }
     if (boldHead) { section = stripMd(boldHead[1]); return; }
+
+    // Bullet / numbered list
     const b = line.match(/^\s*(?:[-•*]|\d+[.)])\s+(.*\S)\s*$/);
-    if (!b) return;
-    const rawText = b[1].replace(/⚠️/g, "").trim();
-    if (stripMd(rawText).length < 4) return;
-    out.push({ id: uid(), raw: rawText, section, checked: false });
+    if (b) {
+      const rawText = b[1].replace(/⚠️/g, "").trim();
+      if (stripMd(rawText).length >= 4)
+        out.push({ id: uid(), raw: rawText, section, checked: false });
+      return;
+    }
+
+    // Table rows
+    if (/^\s*\|/.test(line)) {
+      // Skip separator rows (cells are only dashes / colons / spaces)
+      const cells = line.split("|").slice(1, -1);
+      if (!cells.length) return;
+      if (cells.every(c => /^[\s:|-]+$/.test(c))) return;
+      // Skip header rows
+      if (headerLines.has(idx)) return;
+
+      const rawText = cells.map(c => c.trim()).filter(Boolean).join(" · ").replace(/⚠️/g, "").trim();
+      if (stripMd(rawText).length >= 4)
+        out.push({ id: uid(), raw: rawText, section, checked: false });
+    }
   });
   return out;
 }
